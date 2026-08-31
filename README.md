@@ -155,5 +155,5 @@ Cosign, OIDC, or promotion credentials.
 
 The suite covers canonical source identity, signed and expiring intents, strict
 policy matching, run-bound age handoff envelopes, ciphertext and plaintext
-integrity, job credential separation, exact OCI digest propagation, promotion
-identity, and rollback manifests.
+integrity, job credential separation, exact OCI digest propagation, SPDX
+license evidence, SLSA provenance, promotion identity, and rollback manifests.

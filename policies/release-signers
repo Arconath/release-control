@@ -1,2 +1,4 @@
-# OpenSSH allowed-signers format. Replace examples through a reviewed PR.
+# OpenSSH allowed-signers format. Exactly one real key for `hermawan22` must
+# be added through a reviewed PR before any release intent can verify. Do not
+# commit a placeholder key or a private key.
 # identity[,identity...] [options] key-type base64-key [comment]

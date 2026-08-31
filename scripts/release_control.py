@@ -42,6 +42,12 @@ IMMUTABLE_IMAGE = re.compile(
 )
 ZERO_DIGEST = "sha256:" + "0" * 64
 NAMESPACE = "arconath-release-intent"
+PROVENANCE_TYPE = "https://in-toto.io/Statement/v1"
+SLSA_PROVENANCE_TYPE = "https://slsa.dev/provenance/v1"
+RELEASE_WORKFLOW_ID = (
+    "https://github.com/Arconath/release-control/.github/workflows/"
+    "release.yml@refs/heads/main"
+)
 HANDOFF_FILES = {
     "source": "product.tar.age",
     "candidate": "candidate.oci.tar.age",
@@ -620,6 +626,119 @@ def validate_build_evidence(value: dict[str, Any], intent: dict[str, Any]) -> No
         die("invalid OCI archive SHA-256")
 
 
+def build_provenance(
+    intent: dict[str, Any], evidence: dict[str, Any], release_control_sha: str
+) -> dict[str, Any]:
+    """Create a minimal SLSA/in-toto statement from protected identities."""
+
+    validate_build_evidence(evidence, intent)
+    require_string(release_control_sha, GIT_SHA, "release-control SHA")
+    digest = evidence["artifact"]["digest"]
+    return {
+        "_type": PROVENANCE_TYPE,
+        "subject": [
+            {
+                "name": intent["artifact"]["repository"],
+                "digest": {"sha256": digest.removeprefix("sha256:")},
+            }
+        ],
+        "predicateType": SLSA_PROVENANCE_TYPE,
+        "predicate": {
+            "buildDefinition": {
+                "buildType": "https://arconath.com/release-control/build/v1",
+                "externalParameters": {
+                    "intent_id": intent["intent_id"],
+                    "source_repository": intent["source"]["repository"],
+                    "source_commit": intent["source"]["commit_sha"],
+                    "source_tree": intent["source"]["tree_sha"],
+                    "artifact_version": intent["artifact"]["version"],
+                },
+                "internalParameters": {
+                    "release_control_sha": release_control_sha,
+                    "oci_archive_sha256": evidence["oci_archive_sha256"],
+                },
+                "resolvedDependencies": [
+                    {
+                        "uri": f"https://github.com/{intent['source']['repository']}.git",
+                        "digest": {"gitCommit": intent["source"]["commit_sha"]},
+                    }
+                ],
+            },
+            "runDetails": {"builder": {"id": RELEASE_WORKFLOW_ID}},
+        },
+    }
+
+
+def validate_provenance(
+    value: dict[str, Any],
+    intent: dict[str, Any],
+    evidence: dict[str, Any],
+    release_control_sha: str,
+) -> None:
+    """Verify every provenance identity against the protected release inputs."""
+
+    validate_build_evidence(evidence, intent)
+    require_string(release_control_sha, GIT_SHA, "release-control SHA")
+    strict_keys(value, {"_type", "subject", "predicateType", "predicate"}, "provenance")
+    if value["_type"] != PROVENANCE_TYPE or value["predicateType"] != SLSA_PROVENANCE_TYPE:
+        die("provenance type is not the reviewed in-toto/SLSA contract")
+    subject = value["subject"]
+    if not isinstance(subject, list) or len(subject) != 1 or not isinstance(subject[0], dict):
+        die("provenance must contain exactly one subject")
+    strict_keys(subject[0], {"name", "digest"}, "provenance subject")
+    if subject[0]["name"] != intent["artifact"]["repository"]:
+        die("provenance subject repository does not match intent")
+    subject_digest = subject[0]["digest"]
+    if not isinstance(subject_digest, dict):
+        die("provenance subject digest must be an object")
+    strict_keys(subject_digest, {"sha256"}, "provenance subject digest")
+    require_string(subject_digest["sha256"], re.compile(r"^[0-9a-f]{64}$"), "provenance subject digest")
+    if subject_digest["sha256"] != evidence["artifact"]["digest"].removeprefix("sha256:"):
+        die("provenance subject digest does not match build evidence")
+    predicate = value["predicate"]
+    if not isinstance(predicate, dict):
+        die("provenance predicate must be an object")
+    strict_keys(predicate, {"buildDefinition", "runDetails"}, "provenance predicate")
+    definition = predicate["buildDefinition"]
+    if not isinstance(definition, dict):
+        die("provenance buildDefinition must be an object")
+    strict_keys(
+        definition,
+        {"buildType", "externalParameters", "internalParameters", "resolvedDependencies"},
+        "provenance buildDefinition",
+    )
+    if definition["buildType"] != "https://arconath.com/release-control/build/v1":
+        die("provenance buildType is not the reviewed release-control build")
+    external = definition["externalParameters"]
+    expected_external = {
+        "intent_id": intent["intent_id"],
+        "source_repository": intent["source"]["repository"],
+        "source_commit": intent["source"]["commit_sha"],
+        "source_tree": intent["source"]["tree_sha"],
+        "artifact_version": intent["artifact"]["version"],
+    }
+    if external != expected_external:
+        die("provenance external parameters do not match intent")
+    internal = definition["internalParameters"]
+    if internal != {
+        "release_control_sha": release_control_sha,
+        "oci_archive_sha256": evidence["oci_archive_sha256"],
+    }:
+        die("provenance internal parameters do not match protected evidence")
+    dependencies = definition["resolvedDependencies"]
+    expected_dependencies = [
+        {
+            "uri": f"https://github.com/{intent['source']['repository']}.git",
+            "digest": {"gitCommit": intent["source"]["commit_sha"]},
+        }
+    ]
+    if dependencies != expected_dependencies:
+        die("provenance resolved dependency does not match source identity")
+    details = predicate["runDetails"]
+    if details != {"builder": {"id": RELEASE_WORKFLOW_ID}}:
+        die("provenance builder identity is not the protected release workflow")
+
+
 def verify_published(
     intent: dict[str, Any],
     evidence: dict[str, Any],
@@ -784,6 +903,18 @@ def main() -> int:
     evidence_parser.add_argument("--archive", type=Path, required=True)
     evidence_parser.add_argument("--output", type=Path, required=True)
 
+    provenance_parser = sub.add_parser("provenance")
+    provenance_parser.add_argument("--intent", type=Path, required=True)
+    provenance_parser.add_argument("--evidence", type=Path, required=True)
+    provenance_parser.add_argument("--release-control-sha", required=True)
+    provenance_parser.add_argument("--output", type=Path, required=True)
+
+    verify_provenance_parser = sub.add_parser("verify-provenance")
+    verify_provenance_parser.add_argument("--provenance", type=Path, required=True)
+    verify_provenance_parser.add_argument("--intent", type=Path, required=True)
+    verify_provenance_parser.add_argument("--evidence", type=Path, required=True)
+    verify_provenance_parser.add_argument("--release-control-sha", required=True)
+
     create_handoff_parser = sub.add_parser("create-handoff")
     create_handoff_parser.add_argument("--kind", choices=sorted(HANDOFF_FILES), required=True)
     create_handoff_parser.add_argument("--intent", type=Path, required=True)
@@ -842,6 +973,24 @@ def main() -> int:
                 emit_outputs(args.github_output, intent, policy)
         elif args.command == "build-evidence":
             write_json(args.output, build_evidence(load_json(args.intent), args.archive))
+        elif args.command == "provenance":
+            write_json(
+                args.output,
+                build_provenance(
+                    load_json(args.intent),
+                    load_json(args.evidence),
+                    args.release_control_sha,
+                ),
+            )
+        elif args.command == "verify-provenance":
+            provenance = load_json(args.provenance)
+            require_canonical(args.provenance, provenance)
+            validate_provenance(
+                provenance,
+                load_json(args.intent),
+                load_json(args.evidence),
+                args.release_control_sha,
+            )
         elif args.command == "create-handoff":
             intent = load_json(args.intent)
             require_canonical(args.intent, intent)

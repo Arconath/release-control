@@ -256,6 +256,22 @@ class ReleaseControlTests(unittest.TestCase):
             "registry.arconath.internal/arconath/example-api@sha256:" + "4" * 64,
         )
 
+    def test_slsa_provenance_binds_source_artifact_and_control_revision(self) -> None:
+        archive = self.make_oci()
+        evidence = rc.build_evidence(self.intent, archive)
+        provenance = rc.build_provenance(self.intent, evidence, RELEASE_CONTROL_SHA)
+        rc.validate_provenance(provenance, self.intent, evidence, RELEASE_CONTROL_SHA)
+        self.assertEqual(provenance["subject"][0]["digest"]["sha256"], "4" * 64)
+        self.assertEqual(
+            provenance["predicate"]["buildDefinition"]["internalParameters"]["release_control_sha"],
+            RELEASE_CONTROL_SHA,
+        )
+
+        tampered = json.loads(json.dumps(provenance))
+        tampered["predicate"]["buildDefinition"]["externalParameters"]["source_tree"] = "5" * 40
+        with self.assertRaisesRegex(rc.ContractError, "external parameters"):
+            rc.validate_provenance(tampered, self.intent, evidence, RELEASE_CONTROL_SHA)
+
     def test_changed_archive_is_rejected(self) -> None:
         archive = self.make_oci()
         evidence = rc.build_evidence(self.intent, archive)

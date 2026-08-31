@@ -332,6 +332,14 @@ jobs:
           syft oci-archive:candidate/candidate.oci.tar -o spdx-json=candidate/sbom.spdx.json
           grype sbom:candidate/sbom.spdx.json --fail-on high -o json > candidate/vulnerabilities.json
 
+      - name: Enforce license evidence for every SBOM package
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 control/scripts/check-license-policy.py \
+            --sbom candidate/sbom.spdx.json \
+            --output candidate/licenses.json
+
       - name: Record exact source and OCI identity
         shell: bash
         env:
@@ -344,6 +352,18 @@ jobs:
             --intent candidate/release-intent.json \
             --archive candidate/candidate.oci.tar \
             --output candidate/build-evidence.json
+
+      - name: Generate signed provenance input
+        shell: bash
+        env:
+          RELEASE_CONTROL_SHA: ${{ github.sha }}
+        run: |
+          set -Eeuo pipefail
+          python3 control/scripts/release_control.py provenance \
+            --intent candidate/release-intent.json \
+            --evidence candidate/build-evidence.json \
+            --release-control-sha "$RELEASE_CONTROL_SHA" \
+            --output candidate/provenance.json
 
       - name: Encrypt OCI candidate before artifact transport
         shell: bash
@@ -384,6 +404,8 @@ jobs:
             candidate/build-evidence.json
             candidate/sbom.spdx.json
             candidate/vulnerabilities.json
+            candidate/licenses.json
+            candidate/provenance.json
           if-no-files-found: error
           retention-days: 1
 
@@ -497,6 +519,11 @@ jobs:
             --ciphertext candidate/candidate.oci.tar.age \
             --recipient "$CANDIDATE_HANDOFF_AGE_RECIPIENT" \
             --plaintext candidate/candidate.oci.tar
+          python3 control/scripts/release_control.py verify-provenance \
+            --provenance candidate/provenance.json \
+            --intent candidate/release-intent.json \
+            --evidence candidate/build-evidence.json \
+            --release-control-sha "$GITHUB_SHA"
           rm -f -- candidate/candidate.oci.tar.age candidate/candidate.oci.tar.age.sha256 \
             candidate/candidate-handoff.json "$identity_file"
           unset CANDIDATE_HANDOFF_AGE_IDENTITY
@@ -584,6 +611,8 @@ jobs:
           reference="$IMAGE@$DIGEST"
           cosign sign --yes "$reference"
           cosign attest --yes --type spdxjson --predicate candidate/sbom.spdx.json "$reference"
+          cosign attest --yes --type https://slsa.dev/provenance/v1 \
+            --predicate candidate/provenance.json "$reference"
           cosign attest --yes --type https://arconath.com/BuildEvidence/v1 \
             --predicate candidate/build-evidence.json "$reference"
           cosign verify \
@@ -602,6 +631,8 @@ jobs:
             candidate/release-record.json
             candidate/sbom.spdx.json
             candidate/vulnerabilities.json
+            candidate/licenses.json
+            candidate/provenance.json
           if-no-files-found: error
           retention-days: 30
 

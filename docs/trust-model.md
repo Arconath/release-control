@@ -45,9 +45,9 @@ The release stops before publication when the intent is absent, non-canonical,
 expired, signed by an unknown key, or mismatched with policy; the source commit
 or tree differs; a handoff recipient, run ID, ciphertext hash, decrypted hash,
 or canonical filename differs; age is unavailable; registry host or robot
-credentials are absent; tests or the vulnerability gate fail; or the OCI
-archive changes in transit. A missing handoff identity fails closed before
-source or candidate use.
+credentials are absent; tests, SPDX license evidence, SLSA provenance, or the
+vulnerability gate fail; or the OCI archive changes in transit. A missing
+handoff identity fails closed before source or candidate use.
 
 Validation, publication, and promotion each re-read the remote protected
 `main` SHA. A rerun of an old workflow or a release whose control policy was

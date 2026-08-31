@@ -119,6 +119,17 @@ class WorkflowPolicyTests(unittest.TestCase):
         )
         self.assertIn("refusing overwrite", publish)
 
+    def test_build_requires_license_and_provenance_evidence(self) -> None:
+        text = (WORKFLOWS / "release.yml").read_text(encoding="utf-8")
+        build = job_block(text, "build-test")
+        publish = job_block(text, "publish-sign")
+        self.assertIn("check-license-policy.py", build)
+        self.assertIn("candidate/licenses.json", build)
+        self.assertIn("release_control.py provenance", build)
+        self.assertIn("candidate/provenance.json", build)
+        self.assertIn("verify-provenance", publish)
+        self.assertIn("https://slsa.dev/provenance/v1", publish)
+
     def test_public_artifacts_never_transport_plaintext_source_or_oci(self) -> None:
         text = (WORKFLOWS / "release.yml").read_text(encoding="utf-8")
         source = job_block(text, "source-fetch")
