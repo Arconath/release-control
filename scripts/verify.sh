@@ -10,6 +10,10 @@ command -v actionlint >/dev/null
 actionlint
 command -v shellcheck >/dev/null
 shellcheck scripts/*.sh
+command -v jq >/dev/null
+for schema in contracts/*.json; do
+  jq empty "$schema"
+done
 git diff --check
 
 while IFS= read -r policy; do

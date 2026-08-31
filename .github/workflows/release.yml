@@ -611,6 +611,10 @@ jobs:
           reference="$IMAGE@$DIGEST"
           cosign sign --yes "$reference"
           cosign attest --yes --type spdxjson --predicate candidate/sbom.spdx.json "$reference"
+          cosign attest --yes --type https://arconath.com/LicenseEvidence/v1 \
+            --predicate candidate/licenses.json "$reference"
+          cosign attest --yes --type https://arconath.com/VulnerabilityReport/v1 \
+            --predicate candidate/vulnerabilities.json "$reference"
           cosign attest --yes --type https://slsa.dev/provenance/v1 \
             --predicate candidate/provenance.json "$reference"
           cosign attest --yes --type https://arconath.com/BuildEvidence/v1 \

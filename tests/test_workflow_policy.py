@@ -128,6 +128,8 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertIn("release_control.py provenance", build)
         self.assertIn("candidate/provenance.json", build)
         self.assertIn("verify-provenance", publish)
+        self.assertIn("https://arconath.com/LicenseEvidence/v1", publish)
+        self.assertIn("https://arconath.com/VulnerabilityReport/v1", publish)
         self.assertIn("https://slsa.dev/provenance/v1", publish)
 
     def test_public_artifacts_never_transport_plaintext_source_or_oci(self) -> None:
