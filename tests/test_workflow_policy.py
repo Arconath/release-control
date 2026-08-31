@@ -100,6 +100,17 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertIn("ref: ${{ github.sha }}", text)
         self.assertEqual(text.count('[[ "$current_main" == "$GITHUB_SHA" ]]'), 3)
 
+    def test_publisher_refuses_to_overwrite_an_existing_digest_tag(self) -> None:
+        text = (WORKFLOWS / "release.yml").read_text(encoding="utf-8")
+        publish = job_block(text, "publish-sign")
+        self.assertIn("expected_digest=\"$(jq -er '.artifact.digest' candidate/build-evidence.json)\"", publish)
+        self.assertIn('existing_digest="$(skopeo inspect', publish)
+        self.assertIn(
+            '[[ "$existing_digest" == "$expected_digest" ]]',
+            publish,
+        )
+        self.assertIn("refusing overwrite", publish)
+
     def test_public_artifacts_never_transport_plaintext_source_or_oci(self) -> None:
         text = (WORKFLOWS / "release.yml").read_text(encoding="utf-8")
         source = job_block(text, "source-fetch")

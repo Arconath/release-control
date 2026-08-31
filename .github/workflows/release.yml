@@ -503,11 +503,22 @@ jobs:
             printf 'Artifact repository is outside the canonical registry.\n' >&2
             exit 1
           }
+          expected_digest="$(jq -er '.artifact.digest' candidate/build-evidence.json)"
+          [[ "$expected_digest" == sha256:* ]] || {
+            printf 'Build evidence does not contain an immutable OCI digest.\n' >&2
+            exit 1
+          }
           printf '%s' "$ARCONATH_REGISTRY_PASSWORD" | skopeo login --authfile "$auth_file" \
             --username "$ARCONATH_REGISTRY_USERNAME" --password-stdin "$REGISTRY_HOST"
           immutable_tag="sha-$SOURCE_SHA"
           if skopeo inspect --authfile "$auth_file" "docker://$IMAGE:$immutable_tag" >/dev/null 2>&1; then
             printf 'Immutable source tag exists; verifying exact digest before resuming signing.\n'
+            existing_digest="$(skopeo inspect --authfile "$auth_file" \
+              --format '{{.Digest}}' "docker://$IMAGE:$immutable_tag")"
+            [[ "$existing_digest" == "$expected_digest" ]] || {
+              printf 'Existing immutable source tag resolves to a different digest; refusing overwrite.\n' >&2
+              exit 1
+            }
           else
             skopeo copy --all --authfile "$auth_file" \
               oci-archive:candidate/candidate.oci.tar \
