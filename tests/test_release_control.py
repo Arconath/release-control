@@ -220,6 +220,25 @@ class ReleaseControlTests(unittest.TestCase):
         with self.assertRaisesRegex(rc.ContractError, "port"):
             rc.validate_policy(self.policy)
 
+    def test_policy_can_pin_central_component_build_inputs(self) -> None:
+        self.policy["build"]["build_args"] = {
+            "BASE_IMAGE": "quay.io/keycloak/keycloak:26.7.2@sha256:" + "a" * 64,
+            "BUILDER_IMAGE": "docker.io/library/maven:3.9.11@sha256:" + "b" * 64,
+            "UPSTREAM_VERSION": "26.7.2",
+        }
+        validated = rc.validate_policy(self.policy)
+        self.assertEqual(validated["build"]["build_args"]["UPSTREAM_VERSION"], "26.7.2")
+
+    def test_policy_rejects_mutable_component_build_input(self) -> None:
+        self.policy["build"]["build_args"] = {"BASE_IMAGE": "quay.io/keycloak/keycloak:latest"}
+        with self.assertRaisesRegex(rc.ContractError, "pinned by sha256 digest"):
+            rc.validate_policy(self.policy)
+
+    def test_policy_reserves_source_identity_build_arguments(self) -> None:
+        self.policy["build"]["build_args"] = {"SOURCE_REVISION": "a" * 40}
+        with self.assertRaisesRegex(rc.ContractError, "reserved"):
+            rc.validate_policy(self.policy)
+
     def test_disabled_policy_fails_closed(self) -> None:
         self.policy["enabled"] = False
         write_json(self.policy_dir / "example-api.json", self.policy)

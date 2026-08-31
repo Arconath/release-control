@@ -16,6 +16,6 @@ while IFS= read -r policy; do
   python3 scripts/release_control.py validate-policy \
     --policy "$policy" \
     --allow-disabled
-done < <(find policies/products -type f -name '*.json' -print | sort)
+done < <(find policies/products -type f \( -name '*.json' -o -name '*.json.disabled' \) -print | sort)
 
 printf 'release-control verification passed\n'

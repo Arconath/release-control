@@ -35,6 +35,10 @@ AGE_RECIPIENT = re.compile(r"^age1[a-z0-9]{20,200}$")
 RUN_ID = re.compile(r"^[1-9][0-9]{0,19}$")
 SIGNER_KEY_TYPE = re.compile(r"^(?:ssh-|ecdsa-|sk-)[A-Za-z0-9@._+:-]+$")
 SIGNER_KEY_BLOB = re.compile(r"^[A-Za-z0-9+/]+={0,2}$")
+BUILD_ARG_NAME = re.compile(r"^[A-Z][A-Z0-9_]{0,63}$")
+IMMUTABLE_IMAGE = re.compile(
+    r"^[a-z0-9](?:[a-z0-9./_-]{0,254})(?::[a-z0-9][a-z0-9._-]{0,127})?@sha256:[0-9a-f]{64}$"
+)
 ZERO_DIGEST = "sha256:" + "0" * 64
 NAMESPACE = "arconath-release-intent"
 HANDOFF_FILES = {
@@ -180,11 +184,33 @@ def validate_policy(value: dict[str, Any], *, require_enabled: bool = True) -> d
     build = value["build"]
     if not isinstance(build, dict):
         die("build must be an object")
-    strict_keys(build, {"context", "dockerfile", "platform"}, "build")
+    allowed_build_keys = {"context", "dockerfile", "platform", "build_args"}
+    unknown_build_keys = sorted(set(build) - allowed_build_keys)
+    if unknown_build_keys:
+        die(f"build unknown fields: {', '.join(unknown_build_keys)}")
+    missing_build_keys = sorted({"context", "dockerfile", "platform"} - set(build))
+    if missing_build_keys:
+        die(f"build missing fields: {', '.join(missing_build_keys)}")
     relative_path(build["context"], "build.context", allow_dot=True)
     relative_path(build["dockerfile"], "build.dockerfile")
     if build["platform"] not in {"linux/amd64", "linux/arm64"}:
         die("unsupported build.platform")
+    build_args = build.get("build_args", {})
+    if not isinstance(build_args, dict) or not build_args:
+        if "build_args" in build:
+            die("build.build_args must be a non-empty object when present")
+    else:
+        if len(build_args) > 32:
+            die("build.build_args contains too many entries")
+        for arg_name, arg_value in build_args.items():
+            if not isinstance(arg_name, str) or not BUILD_ARG_NAME.fullmatch(arg_name):
+                die(f"invalid build argument name: {arg_name!r}")
+            if not isinstance(arg_value, str) or not arg_value or "\r" in arg_value or "\n" in arg_value:
+                die(f"invalid build argument value for {arg_name}")
+            if arg_name in {"VCS_REF", "SOURCE_REVISION"}:
+                die(f"{arg_name} is reserved and is injected from the signed source SHA")
+            if arg_name in {"BASE_IMAGE", "BUILDER_IMAGE"} and not IMMUTABLE_IMAGE.fullmatch(arg_value):
+                die(f"{arg_name} must be a lowercase image reference pinned by sha256 digest")
     commands = value["verification_commands"]
     if not isinstance(commands, list) or not commands:
         die("verification_commands must be a non-empty array")
@@ -683,6 +709,9 @@ def utc_now(value: str | None) -> dt.datetime:
 
 
 def emit_outputs(path: Path, intent: dict[str, Any], policy: dict[str, Any]) -> None:
+    build_args = policy["build"].get("build_args", {})
+    if not isinstance(build_args, dict):
+        die("validated policy build arguments must be an object")
     outputs = {
         "intent-id": intent["intent_id"],
         "policy-id": policy["policy_id"],
@@ -695,6 +724,7 @@ def emit_outputs(path: Path, intent: dict[str, Any], policy: dict[str, Any]) -> 
         "context": policy["build"]["context"],
         "dockerfile": policy["build"]["dockerfile"],
         "platform": policy["build"]["platform"],
+        "build-args-json": json.dumps(build_args, sort_keys=True, separators=(",", ":")),
     }
     with path.open("a", encoding="utf-8") as handle:
         for key, value in outputs.items():

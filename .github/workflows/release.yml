@@ -27,6 +27,7 @@ jobs:
       contents: read
     outputs:
       artifact-repository: ${{ steps.contract.outputs.artifact-repository }}
+      build-args-json: ${{ steps.contract.outputs.build-args-json }}
       context: ${{ steps.contract.outputs.context }}
       dockerfile: ${{ steps.contract.outputs.dockerfile }}
       intent-id: ${{ steps.contract.outputs.intent-id }}
@@ -280,6 +281,7 @@ jobs:
         env:
           BUILD_CONTEXT: ${{ needs.validate-intent.outputs.context }}
           DOCKERFILE: ${{ needs.validate-intent.outputs.dockerfile }}
+          BUILD_ARGS_JSON: ${{ needs.validate-intent.outputs.build-args-json }}
           PLATFORM: ${{ needs.validate-intent.outputs.platform }}
           SOURCE_SHA: ${{ needs.validate-intent.outputs.source-sha }}
         run: |
@@ -288,13 +290,37 @@ jobs:
           [[ -d "$context_path" ]]
           [[ -f "$context_path/$DOCKERFILE" ]]
           mkdir -p candidate
+          build_args=()
+          while IFS= read -r build_arg; do
+            [[ "$build_arg" == *=* ]] || {
+              printf 'Central policy emitted an invalid build argument.\n' >&2
+              exit 1
+            }
+            build_args+=(--opt "build-arg:$build_arg")
+          done < <(BUILD_ARGS_JSON="$BUILD_ARGS_JSON" python3 - <<'PY'
+          import json
+          import os
+          value = json.loads(os.environ.get("BUILD_ARGS_JSON", "{}"))
+          if not isinstance(value, dict):
+              raise SystemExit("build argument policy is not an object")
+          for key, item in sorted(value.items()):
+              if not isinstance(key, str) or not isinstance(item, str):
+                  raise SystemExit("build argument policy contains a non-string entry")
+              print(f"{key}={item}")
+          PY
+          )
+          # Source identity is injected by protected release-control code, not
+          # by the product intent.  Both names are supplied so older and
+          # component Containerfiles share one central build boundary.
+          build_args+=(--opt "build-arg:VCS_REF=$SOURCE_SHA")
+          build_args+=(--opt "build-arg:SOURCE_REVISION=$SOURCE_SHA")
           buildctl --addr "$BUILDKIT_HOST" build \
             --frontend dockerfile.v0 \
             --local "context=$context_path" \
             --local "dockerfile=$context_path" \
             --opt "filename=$DOCKERFILE" \
             --opt "platform=$PLATFORM" \
-            --opt "build-arg:VCS_REF=$SOURCE_SHA" \
+            "${build_args[@]}" \
             --output type=oci,dest=candidate/candidate.oci.tar
 
       - name: Generate and scan exact candidate SBOM

@@ -30,7 +30,19 @@
       "properties": {
         "context": {"type": "string"},
         "dockerfile": {"type": "string"},
-        "platform": {"enum": ["linux/amd64", "linux/arm64"]}
+        "platform": {"enum": ["linux/amd64", "linux/arm64"]},
+        "build_args": {
+          "type": "object",
+          "minProperties": 1,
+          "maxProperties": 32,
+          "propertyNames": {"pattern": "^[A-Z][A-Z0-9_]{0,63}$"},
+          "additionalProperties": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512,
+            "pattern": "^[^\\r\\n]+$"
+          }
+        }
       }
     },
     "verification_commands": {

@@ -63,6 +63,28 @@ class BootstrapPolicyTests(unittest.TestCase):
         self.assertNotIn("macos-", serialized)
         self.assertNotIn("windows-", serialized)
 
+    def test_platform_component_policies_are_present_but_fail_closed(self) -> None:
+        policy_dir = ROOT / "policies" / "products"
+        expected = {
+            "platform-keycloak",
+            "platform-traefik",
+            "platform-registry-jwks",
+            "platform-observability",
+            "platform-pgadmin",
+        }
+        actual = {
+            path.name.removesuffix(".json.disabled")
+            for path in policy_dir.glob("platform-*.json.disabled")
+        }
+        self.assertEqual(actual, expected)
+        for policy_id in sorted(expected):
+            path = policy_dir / f"{policy_id}.json.disabled"
+            value = json.loads(path.read_text(encoding="utf-8"))
+            self.assertFalse(value["enabled"])
+            self.assertEqual(value["source_repository"], "Arconath/platform-components")
+            self.assertEqual(value["registry_host"], "registry.arconath.internal")
+            self.assertTrue(value["build"]["build_args"])
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

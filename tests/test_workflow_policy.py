@@ -100,6 +100,14 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertIn("ref: ${{ github.sha }}", text)
         self.assertEqual(text.count('[[ "$current_main" == "$GITHUB_SHA" ]]'), 3)
 
+    def test_build_arguments_are_central_policy_outputs(self) -> None:
+        text = (WORKFLOWS / "release.yml").read_text(encoding="utf-8")
+        self.assertIn("build-args-json:", text)
+        self.assertIn("BUILD_ARGS_JSON:", text)
+        self.assertIn('build-arg:SOURCE_REVISION=$SOURCE_SHA', text)
+        self.assertIn('build-arg:VCS_REF=$SOURCE_SHA', text)
+        self.assertIn("sorted(value.items())", text)
+
     def test_publisher_refuses_to_overwrite_an_existing_digest_tag(self) -> None:
         text = (WORKFLOWS / "release.yml").read_text(encoding="utf-8")
         publish = job_block(text, "publish-sign")
