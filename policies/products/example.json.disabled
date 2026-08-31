@@ -1,0 +1,19 @@
+{
+  "artifact_repository": "registry.arconath.internal/arconath/example-api",
+  "build": {
+    "context": ".",
+    "dockerfile": "Dockerfile",
+    "platform": "linux/amd64"
+  },
+  "enabled": false,
+  "max_intent_age_seconds": 86400,
+  "policy_id": "example-api",
+  "registry_host": "registry.arconath.internal",
+  "schema_version": 1,
+  "source_repository": "Arconath/example",
+  "verification_commands": [
+    [
+      "./scripts/verify.sh"
+    ]
+  ]
+}

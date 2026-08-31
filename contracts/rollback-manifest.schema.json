@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Arconath rollback manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "intent_id", "artifact_repository", "replace_digest", "restore_digest", "reason"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "intent_id": {"type": "string"},
+    "artifact_repository": {"type": "string"},
+    "replace_digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "restore_digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "reason": {"type": "string"}
+  }
+}

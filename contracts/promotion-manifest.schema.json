@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Arconath promotion manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "intent_id", "source", "artifact", "rollback_digest"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "intent_id": {"type": "string"},
+    "source": {"type": "object"},
+    "artifact": {"type": "object"},
+    "rollback_digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+  }
+}

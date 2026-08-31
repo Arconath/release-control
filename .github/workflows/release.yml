@@ -1,0 +1,447 @@
+name: Trusted product release
+
+on:
+  workflow_dispatch:
+    inputs:
+      intent_path:
+        description: Canonical signed intent path under intents/
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: trusted-release-${{ inputs.intent_path }}
+  cancel-in-progress: false
+
+jobs:
+  validate-intent:
+    name: Validate signed intent
+    if: ${{ github.ref == 'refs/heads/main' }}
+    runs-on:
+      group: arconath-jit
+      labels: [self-hosted, linux, x64, arconath-jit, rootless-buildkit]
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      artifact-repository: ${{ steps.contract.outputs.artifact-repository }}
+      context: ${{ steps.contract.outputs.context }}
+      dockerfile: ${{ steps.contract.outputs.dockerfile }}
+      intent-id: ${{ steps.contract.outputs.intent-id }}
+      platform: ${{ steps.contract.outputs.platform }}
+      policy-id: ${{ steps.contract.outputs.policy-id }}
+      registry-host: ${{ steps.contract.outputs.registry-host }}
+      source-name: ${{ steps.contract.outputs.source-name }}
+      source-repository: ${{ steps.contract.outputs.source-repository }}
+      source-sha: ${{ steps.contract.outputs.source-sha }}
+      source-tree: ${{ steps.contract.outputs.source-tree }}
+    steps:
+      - name: Check out protected control source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Validate canonical path and detached signature
+        id: contract
+        shell: bash
+        env:
+          INTENT_PATH: ${{ inputs.intent_path }}
+        run: |
+          set -Eeuo pipefail
+          [[ "$INTENT_PATH" =~ ^intents/[a-z0-9][a-z0-9._-]{7,127}\.json$ ]] || {
+            printf 'Intent must be a canonical file directly under intents/.\n' >&2
+            exit 1
+          }
+          python3 scripts/release_control.py validate-intent \
+            --intent "$INTENT_PATH" \
+            --signature "$INTENT_PATH.sig" \
+            --allowed-signers policies/release-signers \
+            --policy-dir policies/products \
+            --github-output "$GITHUB_OUTPUT"
+
+  source-fetch:
+    name: Fetch exact source
+    needs: validate-intent
+    runs-on:
+      group: arconath-jit
+      labels: [self-hosted, linux, x64, arconath-jit, rootless-buildkit]
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Mint source-only GitHub App token
+        id: source-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ vars.SOURCE_READER_APP_ID }}
+          private-key: ${{ secrets.SOURCE_READER_PRIVATE_KEY }}
+          owner: Arconath
+          repositories: ${{ needs.validate-intent.outputs.source-name }}
+          permission-contents: read
+
+      - name: Check out exact approved source commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ needs.validate-intent.outputs.source-repository }}
+          ref: ${{ needs.validate-intent.outputs.source-sha }}
+          path: product
+          fetch-depth: 1
+          fetch-tags: false
+          persist-credentials: false
+          submodules: false
+          token: ${{ steps.source-token.outputs.token }}
+
+      - name: Verify commit and tree then create source archive
+        shell: bash
+        env:
+          EXPECTED_SHA: ${{ needs.validate-intent.outputs.source-sha }}
+          EXPECTED_TREE: ${{ needs.validate-intent.outputs.source-tree }}
+        run: |
+          set -Eeuo pipefail
+          actual_sha="$(git -C product rev-parse HEAD)"
+          actual_tree="$(git -C product rev-parse 'HEAD^{tree}')"
+          [[ "$actual_sha" == "$EXPECTED_SHA" ]] || { printf 'Source commit mismatch.\n' >&2; exit 1; }
+          [[ "$actual_tree" == "$EXPECTED_TREE" ]] || { printf 'Source tree mismatch.\n' >&2; exit 1; }
+          git -C product archive --format=tar --prefix=product/ HEAD > product.tar
+          printf '%s  product.tar\n' "$(sha256sum product.tar | cut -d' ' -f1)" > product.tar.sha256
+
+      - name: Upload immutable source transport
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: product-source-${{ needs.validate-intent.outputs.intent-id }}
+          path: |
+            product.tar
+            product.tar.sha256
+          if-no-files-found: error
+          retention-days: 1
+
+  build-test:
+    name: Build and test without release credentials
+    needs: [validate-intent, source-fetch]
+    runs-on:
+      group: arconath-jit
+      labels: [self-hosted, linux, x64, arconath-jit, rootless-buildkit]
+    timeout-minutes: 90
+    permissions: {}
+    steps:
+      - name: Check out protected build policy
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          path: control
+          persist-credentials: false
+
+      - name: Download approved source transport
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: product-source-${{ needs.validate-intent.outputs.intent-id }}
+          path: transport
+
+      - name: Verify and unpack source transport
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          (cd transport && sha256sum --check product.tar.sha256)
+          tar --extract --file transport/product.tar --no-same-owner --no-same-permissions
+
+      - name: Run centrally approved product verification
+        shell: bash
+        env:
+          POLICY_ID: ${{ needs.validate-intent.outputs.policy-id }}
+        run: |
+          set -Eeuo pipefail
+          python3 control/scripts/release_control.py run-policy \
+            --policy "control/policies/products/$POLICY_ID.json" \
+            --source product
+
+      - name: Verify isolated rootless builder
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          [[ -n "${BUILDKIT_HOST:-}" && "$BUILDKIT_HOST" == unix://* ]]
+          [[ -S "${BUILDKIT_HOST#unix://}" ]]
+          [[ -z "${DOCKER_HOST:-}" && -z "${CONTAINER_HOST:-}" ]]
+          test ! -S /var/run/docker.sock
+          buildctl --addr "$BUILDKIT_HOST" debug workers >/dev/null
+
+      - name: Build one non-published OCI archive
+        shell: bash
+        env:
+          BUILD_CONTEXT: ${{ needs.validate-intent.outputs.context }}
+          DOCKERFILE: ${{ needs.validate-intent.outputs.dockerfile }}
+          PLATFORM: ${{ needs.validate-intent.outputs.platform }}
+          SOURCE_SHA: ${{ needs.validate-intent.outputs.source-sha }}
+        run: |
+          set -Eeuo pipefail
+          context_path="product/$BUILD_CONTEXT"
+          [[ -d "$context_path" ]]
+          [[ -f "$context_path/$DOCKERFILE" ]]
+          mkdir -p candidate
+          buildctl --addr "$BUILDKIT_HOST" build \
+            --frontend dockerfile.v0 \
+            --local "context=$context_path" \
+            --local "dockerfile=$context_path" \
+            --opt "filename=$DOCKERFILE" \
+            --opt "platform=$PLATFORM" \
+            --opt "build-arg:VCS_REF=$SOURCE_SHA" \
+            --output type=oci,dest=candidate/candidate.oci.tar
+
+      - name: Generate and scan exact candidate SBOM
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          command -v syft >/dev/null
+          command -v grype >/dev/null
+          syft oci-archive:candidate/candidate.oci.tar -o spdx-json=candidate/sbom.spdx.json
+          grype sbom:candidate/sbom.spdx.json --fail-on high -o json > candidate/vulnerabilities.json
+
+      - name: Record exact source and OCI identity
+        shell: bash
+        env:
+          INTENT_PATH: ${{ inputs.intent_path }}
+        run: |
+          set -Eeuo pipefail
+          cp "control/$INTENT_PATH" candidate/release-intent.json
+          cp "control/$INTENT_PATH.sig" candidate/release-intent.json.sig
+          python3 control/scripts/release_control.py build-evidence \
+            --intent candidate/release-intent.json \
+            --archive candidate/candidate.oci.tar \
+            --output candidate/build-evidence.json
+
+      - name: Upload non-published release candidate
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-candidate-${{ needs.validate-intent.outputs.intent-id }}
+          path: candidate/
+          if-no-files-found: error
+          retention-days: 1
+
+  publish-sign:
+    name: Publish and sign exact digest
+    needs: [validate-intent, build-test]
+    environment: publication
+    runs-on:
+      group: arconath-jit
+      labels: [self-hosted, linux, x64, arconath-jit, rootless-buildkit]
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      digest: ${{ steps.publish.outputs.digest }}
+    steps:
+      - name: Check out protected release verifier
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          path: control
+          persist-credentials: false
+
+      - name: Download verified candidate
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: release-candidate-${{ needs.validate-intent.outputs.intent-id }}
+          path: candidate
+
+      - name: Revalidate signed identity after the untrusted build boundary
+        shell: bash
+        env:
+          ARTIFACT_REPOSITORY: ${{ needs.validate-intent.outputs.artifact-repository }}
+          INTENT_ID: ${{ needs.validate-intent.outputs.intent-id }}
+          POLICY_ID: ${{ needs.validate-intent.outputs.policy-id }}
+          REGISTRY_HOST: ${{ needs.validate-intent.outputs.registry-host }}
+          SOURCE_REPOSITORY: ${{ needs.validate-intent.outputs.source-repository }}
+          SOURCE_SHA: ${{ needs.validate-intent.outputs.source-sha }}
+          SOURCE_TREE: ${{ needs.validate-intent.outputs.source-tree }}
+        run: |
+          set -Eeuo pipefail
+          output="$RUNNER_TEMP/revalidated-identity"
+          python3 control/scripts/release_control.py validate-intent \
+            --intent candidate/release-intent.json \
+            --signature candidate/release-intent.json.sig \
+            --allowed-signers control/policies/release-signers \
+            --policy-dir control/policies/products \
+            --github-output "$output"
+          grep -Fqx "intent-id=$INTENT_ID" "$output"
+          grep -Fqx "policy-id=$POLICY_ID" "$output"
+          grep -Fqx "registry-host=$REGISTRY_HOST" "$output"
+          grep -Fqx "source-repository=$SOURCE_REPOSITORY" "$output"
+          grep -Fqx "source-sha=$SOURCE_SHA" "$output"
+          grep -Fqx "source-tree=$SOURCE_TREE" "$output"
+          grep -Fqx "artifact-repository=$ARTIFACT_REPOSITORY" "$output"
+
+      - name: Publish or resume the exact immutable OCI digest
+        id: publish
+        shell: bash
+        env:
+          CONFIGURED_REGISTRY_HOST: ${{ vars.ARCONATH_REGISTRY_HOST }}
+          IMAGE: ${{ needs.validate-intent.outputs.artifact-repository }}
+          REGISTRY_HOST: ${{ needs.validate-intent.outputs.registry-host }}
+          ARCONATH_REGISTRY_USERNAME: ${{ secrets.ARCONATH_REGISTRY_USERNAME }}
+          ARCONATH_REGISTRY_PASSWORD: ${{ secrets.ARCONATH_REGISTRY_PASSWORD }}
+          SOURCE_SHA: ${{ needs.validate-intent.outputs.source-sha }}
+        run: |
+          set -Eeuo pipefail
+          auth_file="$RUNNER_TEMP/release-control-auth.json"
+          export REGISTRY_AUTH_FILE="$auth_file"
+          trap 'rm -f "$auth_file"' EXIT
+          [[ -n "$CONFIGURED_REGISTRY_HOST" && "$CONFIGURED_REGISTRY_HOST" == "$REGISTRY_HOST" ]] || {
+            printf 'Configured canonical registry host is missing or differs from signed policy.\n' >&2
+            exit 1
+          }
+          [[ -n "$ARCONATH_REGISTRY_USERNAME" && -n "$ARCONATH_REGISTRY_PASSWORD" ]] || {
+            printf 'Canonical registry robot credentials are not configured.\n' >&2
+            exit 1
+          }
+          [[ "$IMAGE" == "$REGISTRY_HOST/"* ]] || {
+            printf 'Artifact repository is outside the canonical registry.\n' >&2
+            exit 1
+          }
+          printf '%s' "$ARCONATH_REGISTRY_PASSWORD" | skopeo login --authfile "$auth_file" \
+            --username "$ARCONATH_REGISTRY_USERNAME" --password-stdin "$REGISTRY_HOST"
+          immutable_tag="sha-$SOURCE_SHA"
+          if skopeo inspect --authfile "$auth_file" "docker://$IMAGE:$immutable_tag" >/dev/null 2>&1; then
+            printf 'Immutable source tag exists; verifying exact digest before resuming signing.\n'
+          else
+            skopeo copy --all --authfile "$auth_file" \
+              oci-archive:candidate/candidate.oci.tar \
+              "docker://$IMAGE:$immutable_tag"
+          fi
+          published_digest="$(skopeo inspect --authfile "$auth_file" --format '{{.Digest}}' "docker://$IMAGE:$immutable_tag")"
+          python3 control/scripts/release_control.py verify-published \
+            --intent candidate/release-intent.json \
+            --evidence candidate/build-evidence.json \
+            --archive candidate/candidate.oci.tar \
+            --published-digest "$published_digest" \
+            --output candidate/release-record.json
+          printf 'digest=%s\n' "$published_digest" >> "$GITHUB_OUTPUT"
+
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          cosign-release: v3.1.3
+
+      - name: Sign and attest exact digest
+        shell: bash
+        env:
+          ARCONATH_REGISTRY_USERNAME: ${{ secrets.ARCONATH_REGISTRY_USERNAME }}
+          ARCONATH_REGISTRY_PASSWORD: ${{ secrets.ARCONATH_REGISTRY_PASSWORD }}
+          DIGEST: ${{ steps.publish.outputs.digest }}
+          IMAGE: ${{ needs.validate-intent.outputs.artifact-repository }}
+          REGISTRY_HOST: ${{ needs.validate-intent.outputs.registry-host }}
+        run: |
+          set -Eeuo pipefail
+          export DOCKER_CONFIG="$RUNNER_TEMP/cosign-registry-auth"
+          install -d -m 0700 "$DOCKER_CONFIG"
+          trap 'rm -rf "$DOCKER_CONFIG"' EXIT
+          printf '%s' "$ARCONATH_REGISTRY_PASSWORD" | skopeo login \
+            --authfile "$DOCKER_CONFIG/config.json" \
+            --username "$ARCONATH_REGISTRY_USERNAME" --password-stdin "$REGISTRY_HOST"
+          reference="$IMAGE@$DIGEST"
+          cosign sign --yes "$reference"
+          cosign attest --yes --type spdxjson --predicate candidate/sbom.spdx.json "$reference"
+          cosign attest --yes --type https://arconath.com/BuildEvidence/v1 \
+            --predicate candidate/build-evidence.json "$reference"
+          cosign verify \
+            --certificate-identity-regexp '^https://github\.com/Arconath/release-control/\.github/workflows/release\.yml@refs/heads/main$' \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            "$reference" >/dev/null
+
+      - name: Upload published evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: published-evidence-${{ needs.validate-intent.outputs.intent-id }}
+          path: |
+            candidate/release-intent.json
+            candidate/release-intent.json.sig
+            candidate/build-evidence.json
+            candidate/release-record.json
+            candidate/sbom.spdx.json
+            candidate/vulnerabilities.json
+          if-no-files-found: error
+          retention-days: 30
+
+  promote:
+    name: Emit promotion and rollback evidence
+    needs: [validate-intent, publish-sign]
+    environment: promotion
+    runs-on:
+      group: arconath-jit
+      labels: [self-hosted, linux, x64, arconath-jit, rootless-buildkit]
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      id-token: write
+    steps:
+      - name: Check out protected manifest generator
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          path: control
+          persist-credentials: false
+
+      - name: Download exact published evidence
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: published-evidence-${{ needs.validate-intent.outputs.intent-id }}
+          path: evidence
+
+      - name: Emit immutable promotion and rollback manifests
+        env:
+          PUBLISHED_DIGEST: ${{ needs.publish-sign.outputs.digest }}
+        run: |
+          set -Eeuo pipefail
+          python3 control/scripts/release_control.py validate-intent \
+            --intent evidence/release-intent.json \
+            --signature evidence/release-intent.json.sig \
+            --allowed-signers control/policies/release-signers \
+            --policy-dir control/policies/products
+          python3 control/scripts/release_control.py emit-manifests \
+            --intent evidence/release-intent.json \
+            --release-record evidence/release-record.json \
+            --promotion evidence/promotion-manifest.json \
+            --rollback evidence/rollback-manifest.json \
+            --expected-digest "$PUBLISHED_DIGEST"
+
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          cosign-release: v3.1.3
+
+      - name: Sign promotion and rollback manifests
+        run: |
+          set -Eeuo pipefail
+          cosign sign-blob --yes --bundle evidence/promotion-manifest.sigstore.json \
+            evidence/promotion-manifest.json
+          cosign sign-blob --yes --bundle evidence/rollback-manifest.sigstore.json \
+            evidence/rollback-manifest.json
+
+      - name: Publish immutable release evidence
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INTENT_ID: ${{ needs.validate-intent.outputs.intent-id }}
+          RELEASE_DIGEST: ${{ needs.publish-sign.outputs.digest }}
+        run: |
+          set -Eeuo pipefail
+          evidence_tag="evidence-$INTENT_ID"
+          if gh release view "$evidence_tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            printf 'Release evidence already exists: %s\n' "$evidence_tag" >&2
+            exit 1
+          fi
+          gh release create "$evidence_tag" evidence/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "Release evidence $INTENT_ID" \
+            --notes "Exact published digest: $RELEASE_DIGEST. Deployment still requires reviewed platform-apps admission."
+
+      - name: Upload promotion evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: promotion-evidence-${{ needs.validate-intent.outputs.intent-id }}
+          path: evidence/
+          if-no-files-found: error
+          retention-days: 90

@@ -1,0 +1,236 @@
+#!/usr/bin/env python3
+
+from __future__ import annotations
+
+import datetime as dt
+import hashlib
+import importlib.util
+import io
+import json
+import subprocess
+import tarfile
+import tempfile
+import unittest
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parents[1]
+MODULE_PATH = ROOT / "scripts" / "release_control.py"
+SPEC = importlib.util.spec_from_file_location("release_control", MODULE_PATH)
+assert SPEC and SPEC.loader
+rc = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(rc)
+
+
+def write_json(path: Path, value: object) -> None:
+    path.write_bytes(rc.canonical_bytes(value))
+
+
+class ReleaseControlTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+        self.policy_dir = self.root / "policies"
+        self.policy_dir.mkdir()
+        self.policy = {
+            "artifact_repository": "registry.arconath.internal/arconath/example-api",
+            "build": {
+                "context": ".",
+                "dockerfile": "Dockerfile",
+                "platform": "linux/amd64",
+            },
+            "enabled": True,
+            "max_intent_age_seconds": 86400,
+            "policy_id": "example-api",
+            "registry_host": "registry.arconath.internal",
+            "schema_version": 1,
+            "source_repository": "Arconath/example",
+            "verification_commands": [["./scripts/verify.sh"]],
+        }
+        write_json(self.policy_dir / "example-api.json", self.policy)
+        self.now = dt.datetime(2026, 8, 31, 0, 30, tzinfo=dt.timezone.utc)
+        self.intent = {
+            "artifact": {
+                "repository": "registry.arconath.internal/arconath/example-api",
+                "version": "1.2.3",
+            },
+            "expires_at": "2026-08-31T01:00:00Z",
+            "intent_id": "example-api-1.2.3",
+            "issued_at": "2026-08-31T00:00:00Z",
+            "policy_id": "example-api",
+            "rollback": {
+                "previous_digest": "sha256:" + "1" * 64,
+                "reason": "Restore the last verified production image.",
+            },
+            "schema_version": 1,
+            "signer_identity": "release-operator",
+            "source": {
+                "repository": "Arconath/example",
+                "commit_sha": "2" * 40,
+                "tree_sha": "3" * 40,
+            },
+        }
+        self.intent_path = self.root / "intent.json"
+        write_json(self.intent_path, self.intent)
+        self.key = self.root / "release-key"
+        subprocess.run(
+            ["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", str(self.key)],
+            check=True,
+        )
+        public = (self.key.with_suffix(".pub")).read_text(encoding="utf-8").strip()
+        self.allowed = self.root / "allowed_signers"
+        self.allowed.write_text(f"release-operator {public}\n", encoding="utf-8")
+        subprocess.run(
+            [
+                "ssh-keygen",
+                "-Y",
+                "sign",
+                "-f",
+                str(self.key),
+                "-n",
+                rc.NAMESPACE,
+                str(self.intent_path),
+            ],
+            check=True,
+            capture_output=True,
+        )
+        self.signature = Path(f"{self.intent_path}.sig")
+
+    def tearDown(self) -> None:
+        self.temp.cleanup()
+
+    def make_oci(self, digest: str | None = None) -> Path:
+        digest = digest or "sha256:" + "4" * 64
+        index = rc.canonical_bytes(
+            {
+                "schemaVersion": 2,
+                "manifests": [
+                    {
+                        "mediaType": "application/vnd.oci.image.manifest.v1+json",
+                        "digest": digest,
+                        "size": 123,
+                    }
+                ],
+            }
+        )
+        archive = self.root / "candidate.oci.tar"
+        with tarfile.open(archive, "w") as handle:
+            info = tarfile.TarInfo("index.json")
+            info.size = len(index)
+            handle.addfile(info, io.BytesIO(index))
+        return archive
+
+    def validate(self) -> tuple[dict, dict]:
+        return rc.validate_intent(
+            self.intent_path,
+            self.signature,
+            self.allowed,
+            self.policy_dir,
+            self.now,
+        )
+
+    def test_valid_signed_intent_binds_full_source_identity(self) -> None:
+        intent, policy = self.validate()
+        self.assertEqual(intent["source"]["commit_sha"], "2" * 40)
+        self.assertEqual(intent["source"]["tree_sha"], "3" * 40)
+        self.assertEqual(policy["artifact_repository"], intent["artifact"]["repository"])
+
+    def test_tampered_tree_is_rejected_by_signature(self) -> None:
+        tampered = dict(self.intent)
+        tampered["source"] = dict(self.intent["source"], tree_sha="5" * 40)
+        write_json(self.intent_path, tampered)
+        with self.assertRaisesRegex(rc.ContractError, "signature verification failed"):
+            self.validate()
+
+    def test_noncanonical_intent_is_rejected_before_signature(self) -> None:
+        self.intent_path.write_text(json.dumps(self.intent, indent=2), encoding="utf-8")
+        with self.assertRaisesRegex(rc.ContractError, "not canonical JSON"):
+            self.validate()
+
+    def test_expired_intent_is_rejected(self) -> None:
+        with self.assertRaisesRegex(rc.ContractError, "expired"):
+            rc.validate_intent(
+                self.intent_path,
+                self.signature,
+                self.allowed,
+                self.policy_dir,
+                dt.datetime(2026, 8, 31, 1, 0, tzinfo=dt.timezone.utc),
+            )
+
+    def test_unknown_intent_field_is_rejected(self) -> None:
+        value = dict(self.intent, surprise=True)
+        with self.assertRaisesRegex(rc.ContractError, "unknown fields"):
+            rc.validate_intent_value(value, self.policy, now=self.now)
+
+    def test_registry_repository_traversal_is_rejected(self) -> None:
+        self.intent["artifact"]["repository"] = (
+            "registry.arconath.internal/arconath/../other"
+        )
+        with self.assertRaisesRegex(rc.ContractError, "invalid artifact.repository"):
+            rc.validate_intent_value(self.intent, self.policy, now=self.now)
+
+    def test_invalid_registry_port_is_rejected(self) -> None:
+        self.policy["registry_host"] = "registry.arconath.internal:99999"
+        with self.assertRaisesRegex(rc.ContractError, "port"):
+            rc.validate_policy(self.policy)
+
+    def test_disabled_policy_fails_closed(self) -> None:
+        self.policy["enabled"] = False
+        write_json(self.policy_dir / "example-api.json", self.policy)
+        with self.assertRaisesRegex(rc.ContractError, "disabled"):
+            self.validate()
+
+    def test_exact_artifact_digest_survives_transport_and_publication(self) -> None:
+        archive = self.make_oci()
+        evidence = rc.build_evidence(self.intent, archive)
+        record = rc.verify_published(
+            self.intent, evidence, archive, "sha256:" + "4" * 64
+        )
+        self.assertEqual(record["artifact"]["digest"], evidence["artifact"]["digest"])
+        self.assertEqual(
+            record["artifact"]["reference"],
+            "registry.arconath.internal/arconath/example-api@sha256:" + "4" * 64,
+        )
+
+    def test_changed_archive_is_rejected(self) -> None:
+        archive = self.make_oci()
+        evidence = rc.build_evidence(self.intent, archive)
+        with archive.open("ab") as handle:
+            handle.write(b"tamper")
+        with self.assertRaisesRegex(rc.ContractError, "archive SHA-256 differs"):
+            rc.verify_published(self.intent, evidence, archive, "sha256:" + "4" * 64)
+
+    def test_published_digest_mismatch_is_rejected(self) -> None:
+        archive = self.make_oci()
+        evidence = rc.build_evidence(self.intent, archive)
+        with self.assertRaisesRegex(rc.ContractError, "published digest differs"):
+            rc.verify_published(self.intent, evidence, archive, "sha256:" + "5" * 64)
+
+    def test_promotion_and_rollback_are_bound_to_exact_digest(self) -> None:
+        archive = self.make_oci()
+        evidence = rc.build_evidence(self.intent, archive)
+        record = rc.verify_published(self.intent, evidence, archive, "sha256:" + "4" * 64)
+        promotion, rollback = rc.release_manifests(self.intent, record)
+        self.assertEqual(promotion["artifact"]["digest"], "sha256:" + "4" * 64)
+        self.assertEqual(promotion["rollback_digest"], "sha256:" + "1" * 64)
+        self.assertEqual(rollback["replace_digest"], "sha256:" + "4" * 64)
+        self.assertEqual(rollback["restore_digest"], "sha256:" + "1" * 64)
+
+    def test_rollback_must_not_point_to_new_release(self) -> None:
+        archive = self.make_oci()
+        evidence = rc.build_evidence(self.intent, archive)
+        record = rc.verify_published(self.intent, evidence, archive, "sha256:" + "4" * 64)
+        self.intent["rollback"]["previous_digest"] = "sha256:" + "4" * 64
+        with self.assertRaisesRegex(rc.ContractError, "must differ"):
+            rc.release_manifests(self.intent, record)
+
+    def test_promotion_rejects_digest_different_from_publish_job(self) -> None:
+        archive = self.make_oci()
+        evidence = rc.build_evidence(self.intent, archive)
+        record = rc.verify_published(self.intent, evidence, archive, "sha256:" + "4" * 64)
+        with self.assertRaisesRegex(rc.ContractError, "publish job output"):
+            rc.release_manifests(self.intent, record, "sha256:" + "5" * 64)
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)

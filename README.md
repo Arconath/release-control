@@ -1,0 +1,104 @@
+# Arconath Release Control
+
+`release-control` is a public, protected, centralized release authority for
+Arconath products whose source repositories cannot yet enforce private branch
+or environment protection. Product workflows remain read-only. Only this
+repository can fetch an approved source commit, build a candidate without
+publish credentials, publish and sign the exact candidate digest to the
+self-hosted Arconath Distribution registry, and emit a promotion plus rollback
+manifest. GHCR is an optional mirror, never the canonical deployment source.
+
+This repository does **not** deploy workloads. `Arconath/platform-apps` remains
+the owner of environment state and must consume the signed promotion manifest
+through its own reviewed admission process.
+
+## Trust flow
+
+```text
+signed intent + protected policy
+            |
+            v
+source-fetch (source GitHub App, contents:read only)
+            |
+            v
+build-test (no repository, package, OIDC, or deployment authority)
+            |
+            v
+publish-sign (canonical Distribution robot + OIDC; never executes product source)
+            |
+            v
+promotion (release evidence + OIDC; no package/source credential)
+            |
+            v
+reviewed platform-apps digest proposal
+```
+
+Every transfer is bound to the source repository, full commit SHA, Git tree
+SHA, OCI manifest digest, and SHA-256 of the transported OCI archive. Mutable
+tags are never accepted as source or deployment identity.
+
+## Release intent
+
+An operator creates a canonical JSON document under `intents/<intent-id>.json`
+and signs its exact bytes using an SSH signing key listed in
+`policies/release-signers`. The private signing key is never stored here.
+
+```sh
+python3 scripts/release_control.py canonicalize \
+  --input intent.draft.json --output intents/2026-08-31-example.json
+ssh-keygen -Y sign -f /secure/path/release-key \
+  -n arconath-release-intent intents/2026-08-31-example.json
+python3 scripts/release_control.py validate-intent \
+  --intent intents/2026-08-31-example.json \
+  --signature intents/2026-08-31-example.json.sig \
+  --allowed-signers policies/release-signers \
+  --policy-dir policies/products
+```
+
+Intent and policy schemas are documented in [contracts/release-intent.schema.json](contracts/release-intent.schema.json)
+and [contracts/product-policy.schema.json](contracts/product-policy.schema.json).
+The intent must include the prior production digest. A first production release
+uses the explicitly documented empty baseline digest, not a missing field.
+
+## Repository configuration
+
+The workflow is fail-closed until an administrator configures:
+
+- Repository visibility: public.
+- Protected `main`: pull request required, one approval, stale approvals
+  dismissed, approval after last push, conversation resolution, required
+  `validate / contracts and workflow policy`, linear history, force-push and
+  deletion disabled, administrators enforced.
+- Protected `publication` and `promotion` environments restricted to `main`.
+- `SOURCE_READER_APP_ID` repository variable.
+- `SOURCE_READER_PRIVATE_KEY` repository secret for a GitHub App installed only
+  on approved source repositories with `contents:read` and `metadata:read`.
+- `ARCONATH_REGISTRY_HOST` repository variable matching the reviewed policy,
+  normally `registry.arconath.internal` on the private service network.
+- `ARCONATH_REGISTRY_USERNAME` and `ARCONATH_REGISTRY_PASSWORD` secrets on the
+  protected `publication` environment for a robot account restricted to
+  allowlisted repositories. The job fails before login if any value is absent.
+- At least two reviewed operator public keys in `policies/release-signers`.
+
+Do not add a personal access token. The source GitHub App token is short-lived
+and repository scoped. Registry robot credentials stay only in the publication
+environment and are never exposed to source-fetch, build-test, or promotion.
+
+## Adding a product artifact
+
+Copy `policies/products/example.json.disabled`, assign one OCI image per policy,
+use argv arrays for deterministic verification commands, then enable it through
+a reviewed pull request. The central policy—not product-controlled input—owns
+the repository, canonical registry host, build context, Dockerfile, platform,
+and package destination. An optional mirror must copy from the already signed
+canonical digest, verify digest equality, and must never become a GitOps input.
+
+## Verification
+
+```sh
+./scripts/verify.sh
+```
+
+The suite covers canonical source identity, signed and expiring intents, strict
+policy matching, source archive integrity, job credential separation, exact OCI
+digest propagation, promotion identity, and rollback manifests.

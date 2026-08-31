@@ -1,0 +1,2 @@
+# OpenSSH allowed-signers format. Replace examples through a reviewed PR.
+# identity[,identity...] [options] key-type base64-key [comment]
