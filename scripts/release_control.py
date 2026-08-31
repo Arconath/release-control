@@ -27,6 +27,7 @@ REGISTRY_HOST = re.compile(
 )
 CANONICAL_REGISTRY_HOST = "registry.arconath.internal"
 CANONICAL_ARTIFACT_PREFIX = f"{CANONICAL_REGISTRY_HOST}/arconath/"
+RELEASE_OPERATOR_IDENTITY = "hermawan22"
 ARTIFACT_REPO = re.compile(
     r"^(?=.{8,255}$)[a-z0-9.-]+(?::[1-9][0-9]{0,4})?(?:/[a-z0-9][a-z0-9._-]{0,127})+$"
 )
@@ -257,7 +258,12 @@ def validate_intent_value(
         die("unsupported intent schema_version")
     require_string(value["intent_id"], INTENT_ID, "intent_id")
     require_string(value["policy_id"], POLICY_ID, "policy_id")
-    require_string(value["signer_identity"], IDENT, "signer_identity")
+    signer_identity = require_string(value["signer_identity"], IDENT, "signer_identity")
+    if signer_identity != RELEASE_OPERATOR_IDENTITY:
+        die(
+            "signer_identity must be the configured release operator: "
+            f"{RELEASE_OPERATOR_IDENTITY}"
+        )
     if value["policy_id"] != policy["policy_id"]:
         die("intent policy_id does not match policy")
     issued = parse_time(value["issued_at"], "issued_at")
@@ -306,7 +312,13 @@ def verify_ssh_signature(intent: Path, signature: Path, allowed: Path, identity:
         die(f"missing detached signature: {signature}")
     if not allowed.is_file():
         die(f"missing allowed signers file: {allowed}")
-    require_two_operator_keys(allowed)
+    require_string(identity, IDENT, "signer_identity")
+    if identity != RELEASE_OPERATOR_IDENTITY:
+        die(
+            "signer_identity must be the configured release operator: "
+            f"{RELEASE_OPERATOR_IDENTITY}"
+        )
+    require_single_operator_key(allowed)
     command = [
         "ssh-keygen",
         "-Y",
@@ -329,14 +341,14 @@ def verify_ssh_signature(intent: Path, signature: Path, allowed: Path, identity:
         die(f"release intent signature verification failed: {detail}")
 
 
-def require_two_operator_keys(allowed: Path) -> None:
-    """Require two distinct named operator keys before any release can verify.
+def require_single_operator_key(allowed: Path) -> None:
+    """Require exactly the configured release operator's one public key.
 
-    GitHub branch protection supplies the second human review for the change
-    that adds an intent.  This local check prevents a future repository
-    configuration from silently reducing the cryptographic operator set to a
-    single key.  We intentionally inspect only public key metadata and never
-    include key material in an error message.
+    This is an explicit single-operator deployment policy for the bootstrap
+    phase. It is intentionally strict: aliases, additional identities, and
+    additional keys are rejected instead of silently widening the signer set.
+    We inspect only public key metadata and never include key material in an
+    error message.
     """
 
     try:
@@ -346,6 +358,7 @@ def require_two_operator_keys(allowed: Path) -> None:
 
     operator_keys: set[tuple[str, str]] = set()
     operator_identities: set[str] = set()
+    operator_lines = 0
     for line_number, line in enumerate(lines, 1):
         stripped = line.strip()
         if not stripped or stripped.startswith("#"):
@@ -358,16 +371,29 @@ def require_two_operator_keys(allowed: Path) -> None:
         if key_index is None or key_index == 0 or key_index + 1 >= len(fields):
             die(f"allowed signers line {line_number} is not a named public key")
         principals = fields[0].split(",")
-        if not principals or any(not IDENT.fullmatch(principal) for principal in principals):
+        if principals != [RELEASE_OPERATOR_IDENTITY]:
+            die(
+                "allowed signers must contain exactly one "
+                f"{RELEASE_OPERATOR_IDENTITY} identity"
+            )
+        if any(not IDENT.fullmatch(principal) for principal in principals):
             die(f"allowed signers line {line_number} has an invalid operator identity")
         key_blob = fields[key_index + 1]
         if not SIGNER_KEY_BLOB.fullmatch(key_blob):
             die(f"allowed signers line {line_number} has an invalid public key encoding")
         operator_identities.update(principals)
         operator_keys.add((fields[key_index], key_blob))
+        operator_lines += 1
 
-    if len(operator_keys) < 2 or len(operator_identities) < 2:
-        die("at least two distinct named operator keys are required")
+    if (
+        operator_lines != 1
+        or len(operator_keys) != 1
+        or operator_identities != {RELEASE_OPERATOR_IDENTITY}
+    ):
+        die(
+            "exactly one named release operator key is required for "
+            f"{RELEASE_OPERATOR_IDENTITY}"
+        )
 
 
 def validate_intent(

@@ -27,15 +27,16 @@
     "allow_force_pushes": false,
     "dismiss_stale_reviews": true,
     "enforce_admins": true,
-    "linear_history": true,
-    "required_approvals": 2,
+    "linear_history": false,
+    "required_approvals": 0,
     "required_checks": [
       "contracts and workflow policy"
     ],
-    "require_code_owner_review": true,
-    "require_last_push_approval": true,
+    "require_code_owner_review": false,
+    "require_last_push_approval": false,
     "require_signed_commits": true,
-    "strict_checks": true
+    "strict_checks": true,
+    "allowed_merge_methods": ["merge"]
   },
   "repository": {
     "delete_branch_on_merge": true,

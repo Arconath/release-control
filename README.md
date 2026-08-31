@@ -83,10 +83,11 @@ uses the explicitly documented empty baseline digest, not a missing field.
 The workflow is fail-closed until an administrator configures:
 
 - Repository visibility: public.
-- Protected `main`: pull request required, two approvals, stale approvals
-  dismissed, approval after last push, conversation resolution, required
-  `validate / contracts and workflow policy`, linear history, force-push and
-  deletion disabled, administrators enforced.
+- Protected `main`: pull request required, strict required status, signed
+  commits, force-push and deletion disabled, administrators enforced, and
+  merge commits allowed. GitHub Free does not enforce a reviewer count for the
+  single-operator bootstrap; `hermawan22` must still perform the documented
+  manual review before merging and signing an intent.
 - Protected `publication` and `promotion` environments restricted to `main`.
 - `SOURCE_READER_APP_ID` repository variable.
 - `SOURCE_READER_PRIVATE_KEY` repository secret for a GitHub App installed only
@@ -106,16 +107,17 @@ The workflow is fail-closed until an administrator configures:
   allowlisted repositories, plus `CANDIDATE_HANDOFF_AGE_IDENTITY` for the
   bounded candidate decryption step. The job fails before login if any value
   is absent.
-- At least two reviewed operator public keys in `policies/release-signers`.
-  The verifier rejects a release when fewer than two distinct named keys are
-  present, even if the submitted intent is signed by the remaining key.
+- Exactly one reviewed public key for the named bootstrap operator
+  `hermawan22` must be present in `policies/release-signers`. The verifier
+  rejects a release when the file is empty, contains another identity, aliases,
+  or more than one key. No organization team is used as a hidden substitute.
 
-The organization currently has only the bootstrap operator `@hermawan22`.
-Before enabling a product policy or adding publication secrets, invite a second
-named operator, add that user explicitly to `CODEOWNERS`, and register a
-separate release-intent public key. No organization team is used as a hidden
-substitute. Main intentionally remains fail-closed at two approvals until that
-second operator exists.
+This single-operator policy is an explicit bootstrap trade-off: the intent is
+signed by `hermawan22`, manual review is recorded in the release evidence, and
+every privileged job revalidates the protected control SHA. GitHub Free does
+not provide server-enforced two-person separation here. Add a separately
+reviewed operator only through a policy change if that requirement returns;
+never silently widen the allowlist.
 
 Do not add a personal access token. The source GitHub App token is short-lived
 and repository scoped. Age transport identities are separate from the source

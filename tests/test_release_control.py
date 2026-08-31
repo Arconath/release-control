@@ -65,7 +65,7 @@ class ReleaseControlTests(unittest.TestCase):
                 "reason": "Restore the last verified production image.",
             },
             "schema_version": 1,
-            "signer_identity": "release-operator",
+            "signer_identity": "hermawan22",
             "source": {
                 "repository": "Arconath/example",
                 "commit_sha": "2" * 40,
@@ -79,17 +79,9 @@ class ReleaseControlTests(unittest.TestCase):
             ["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", str(self.key)],
             check=True,
         )
-        self.second_key = self.root / "release-key-two"
-        subprocess.run(
-            ["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", str(self.second_key)],
-            check=True,
-        )
         public = (self.key.with_suffix(".pub")).read_text(encoding="utf-8").strip()
-        second_public = (self.second_key.with_suffix(".pub")).read_text(encoding="utf-8").strip()
         self.allowed = self.root / "allowed_signers"
-        self.allowed.write_text(
-            f"release-operator {public}\nsecond-operator {second_public}\n", encoding="utf-8"
-        )
+        self.allowed.write_text(f"hermawan22 {public}\n", encoding="utf-8")
         subprocess.run(
             [
                 "ssh-keygen",
@@ -172,23 +164,24 @@ class ReleaseControlTests(unittest.TestCase):
         with self.assertRaisesRegex(rc.ContractError, "unknown fields"):
             rc.validate_intent_value(value, self.policy, now=self.now)
 
-    def test_single_operator_key_is_rejected_before_signature_verification(self) -> None:
-        single = self.root / "single-operator-signers"
-        single.write_text(self.allowed.read_text(encoding="utf-8").splitlines()[0] + "\n", encoding="utf-8")
-        with self.assertRaisesRegex(rc.ContractError, "at least two distinct named operator keys"):
+    def test_multiple_operator_keys_are_rejected_before_signature_verification(self) -> None:
+        extra = self.root / "multiple-operator-signers"
+        public = self.key.with_suffix(".pub").read_text(encoding="utf-8").strip()
+        extra.write_text(f"hermawan22 {public}\nhermawan22 {public}\n", encoding="utf-8")
+        with self.assertRaisesRegex(rc.ContractError, "exactly one named release operator key"):
             rc.validate_intent(
                 self.intent_path,
                 self.signature,
-                single,
+                extra,
                 self.policy_dir,
                 self.now,
             )
 
-    def test_two_operator_aliases_cannot_share_one_key(self) -> None:
+    def test_operator_aliases_are_rejected(self) -> None:
         one_key = self.root / "aliased-operator-signers"
         public = self.key.with_suffix(".pub").read_text(encoding="utf-8").strip()
-        one_key.write_text(f"release-operator,second-operator {public}\n", encoding="utf-8")
-        with self.assertRaisesRegex(rc.ContractError, "at least two distinct named operator keys"):
+        one_key.write_text(f"hermawan22,backup-operator {public}\n", encoding="utf-8")
+        with self.assertRaisesRegex(rc.ContractError, "exactly one hermawan22 identity"):
             rc.validate_intent(
                 self.intent_path,
                 self.signature,
@@ -196,6 +189,11 @@ class ReleaseControlTests(unittest.TestCase):
                 self.policy_dir,
                 self.now,
             )
+
+    def test_non_bootstrap_signer_identity_is_rejected(self) -> None:
+        value = dict(self.intent, signer_identity="other-operator")
+        with self.assertRaisesRegex(rc.ContractError, "configured release operator: hermawan22"):
+            rc.validate_intent_value(value, self.policy, now=self.now)
 
     def test_noncanonical_registry_host_is_rejected(self) -> None:
         self.policy["registry_host"] = "registry.example.invalid"

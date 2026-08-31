@@ -8,10 +8,13 @@
 - GitHub's OIDC identity for this exact workflow on `refs/heads/main`.
 - The configured private Distribution endpoint and its TLS trust chain.
 
-Production activation requires two distinct named GitHub reviewers and two
-distinct allowlisted intent-signing keys. The bootstrap repository contains
-only `@hermawan22`; a second real operator must replace this documented gap.
-The two-approval branch rule deliberately blocks policy changes until then.
+Production activation uses one named operator, `@hermawan22`, and one
+allowlisted intent-signing key. This is an explicit bootstrap policy, not a
+claim of two-person separation. GitHub Free requires the pull request and
+strict status/signed-commit controls but does not enforce a reviewer count;
+manual review must be recorded before the operator merges and signs an intent.
+Every privileged job revalidates the exact protected control SHA before
+crossing its credential boundary.
 
 Product source and every artifact it creates remain untrusted data. Product
 source runs only in `build-test`. The source archive and OCI candidate cross
