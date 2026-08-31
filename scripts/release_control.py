@@ -25,12 +25,16 @@ SOURCE_REPO = re.compile(r"^Arconath/[a-z0-9][a-z0-9-]{1,99}$")
 REGISTRY_HOST = re.compile(
     r"^(?=.{4,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?::[1-9][0-9]{0,4})?$"
 )
+CANONICAL_REGISTRY_HOST = "registry.arconath.internal"
+CANONICAL_ARTIFACT_PREFIX = f"{CANONICAL_REGISTRY_HOST}/arconath/"
 ARTIFACT_REPO = re.compile(
     r"^(?=.{8,255}$)[a-z0-9.-]+(?::[1-9][0-9]{0,4})?(?:/[a-z0-9][a-z0-9._-]{0,127})+$"
 )
 VERSION = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?$")
 AGE_RECIPIENT = re.compile(r"^age1[a-z0-9]{20,200}$")
 RUN_ID = re.compile(r"^[1-9][0-9]{0,19}$")
+SIGNER_KEY_TYPE = re.compile(r"^(?:ssh-|ecdsa-|sk-)[A-Za-z0-9@._+:-]+$")
+SIGNER_KEY_BLOB = re.compile(r"^[A-Za-z0-9+/]+={0,2}$")
 ZERO_DIGEST = "sha256:" + "0" * 64
 NAMESPACE = "arconath-release-intent"
 HANDOFF_FILES = {
@@ -161,8 +165,15 @@ def validate_policy(value: dict[str, Any], *, require_enabled: bool = True) -> d
     require_string(value["source_repository"], SOURCE_REPO, "source_repository")
     registry_host = validate_registry_host(value["registry_host"])
     validate_artifact_repository(value["artifact_repository"], "artifact_repository")
+    if registry_host != CANONICAL_REGISTRY_HOST:
+        die(
+            "registry_host must be the canonical internal Distribution host: "
+            f"{CANONICAL_REGISTRY_HOST}"
+        )
     if not value["artifact_repository"].startswith(f"{registry_host}/"):
         die("artifact_repository must be hosted by registry_host")
+    if not value["artifact_repository"].startswith(CANONICAL_ARTIFACT_PREFIX):
+        die("artifact_repository must use the canonical arconath/ namespace")
     age = value["max_intent_age_seconds"]
     if isinstance(age, bool) or not isinstance(age, int) or not 300 <= age <= 604800:
         die("max_intent_age_seconds must be between 300 and 604800")
@@ -269,6 +280,7 @@ def verify_ssh_signature(intent: Path, signature: Path, allowed: Path, identity:
         die(f"missing detached signature: {signature}")
     if not allowed.is_file():
         die(f"missing allowed signers file: {allowed}")
+    require_two_operator_keys(allowed)
     command = [
         "ssh-keygen",
         "-Y",
@@ -289,6 +301,47 @@ def verify_ssh_signature(intent: Path, signature: Path, allowed: Path, identity:
     if result.returncode:
         detail = result.stderr.decode(errors="replace").strip()
         die(f"release intent signature verification failed: {detail}")
+
+
+def require_two_operator_keys(allowed: Path) -> None:
+    """Require two distinct named operator keys before any release can verify.
+
+    GitHub branch protection supplies the second human review for the change
+    that adds an intent.  This local check prevents a future repository
+    configuration from silently reducing the cryptographic operator set to a
+    single key.  We intentionally inspect only public key metadata and never
+    include key material in an error message.
+    """
+
+    try:
+        lines = allowed.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeError) as exc:
+        die(f"cannot read allowed signers file: {exc}")
+
+    operator_keys: set[tuple[str, str]] = set()
+    operator_identities: set[str] = set()
+    for line_number, line in enumerate(lines, 1):
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        fields = stripped.split()
+        key_index = next(
+            (index for index, field in enumerate(fields) if SIGNER_KEY_TYPE.fullmatch(field)),
+            None,
+        )
+        if key_index is None or key_index == 0 or key_index + 1 >= len(fields):
+            die(f"allowed signers line {line_number} is not a named public key")
+        principals = fields[0].split(",")
+        if not principals or any(not IDENT.fullmatch(principal) for principal in principals):
+            die(f"allowed signers line {line_number} has an invalid operator identity")
+        key_blob = fields[key_index + 1]
+        if not SIGNER_KEY_BLOB.fullmatch(key_blob):
+            die(f"allowed signers line {line_number} has an invalid public key encoding")
+        operator_identities.update(principals)
+        operator_keys.add((fields[key_index], key_blob))
+
+    if len(operator_keys) < 2 or len(operator_identities) < 2:
+        die("at least two distinct named operator keys are required")
 
 
 def validate_intent(

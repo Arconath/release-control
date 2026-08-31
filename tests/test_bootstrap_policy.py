@@ -1,0 +1,68 @@
+#!/usr/bin/env python3
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+import unittest
+
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+class BootstrapPolicyTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.settings = json.loads(
+            (ROOT / "bootstrap/repository-settings.json").read_text(encoding="utf-8")
+        )
+
+    def test_repository_is_public_and_uses_free_protection_controls(self) -> None:
+        repository = self.settings["repository"]
+        protection = self.settings["main_protection"]
+        self.assertEqual(repository["visibility"], "public")
+        self.assertTrue(protection["enforce_admins"])
+        self.assertTrue(protection["strict_checks"])
+        self.assertTrue(protection["require_signed_commits"])
+        self.assertTrue(protection["require_code_owner_review"])
+        self.assertTrue(protection["require_last_push_approval"])
+        self.assertEqual(protection["required_approvals"], 2)
+        self.assertFalse(protection["allow_force_pushes"])
+        self.assertFalse(protection["allow_deletions"])
+        self.assertEqual(protection["required_checks"], ["contracts and workflow policy"])
+
+    def test_release_environments_are_branch_restricted_and_credential_scoped(self) -> None:
+        environments = self.settings["environments"]
+        self.assertEqual(
+            set(environments), {"source-handoff", "publication", "promotion"}
+        )
+        for name, environment in environments.items():
+            with self.subTest(environment=name):
+                self.assertTrue(environment["protected_branches_only"])
+                self.assertEqual(environment["wait_timer_minutes"], 0)
+
+        self.assertEqual(
+            environments["source-handoff"]["required_secrets"],
+            ["SOURCE_HANDOFF_AGE_IDENTITY"],
+        )
+        self.assertEqual(
+            environments["publication"]["required_secrets"],
+            [
+                "ARCONATH_REGISTRY_USERNAME",
+                "ARCONATH_REGISTRY_PASSWORD",
+                "CANDIDATE_HANDOFF_AGE_IDENTITY",
+            ],
+        )
+        self.assertEqual(environments["promotion"]["required_secrets"], [])
+
+    def test_bootstrap_does_not_introduce_a_github_team_or_hosted_runner(self) -> None:
+        serialized = json.dumps(self.settings, sort_keys=True)
+        self.assertNotIn("GitHub Actions", serialized)
+        self.assertNotIn("@Arconath/", serialized)
+        self.assertNotIn("ubuntu-", serialized)
+        self.assertNotIn("macos-", serialized)
+        self.assertNotIn("windows-", serialized)
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)

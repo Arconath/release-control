@@ -79,9 +79,17 @@ class ReleaseControlTests(unittest.TestCase):
             ["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", str(self.key)],
             check=True,
         )
+        self.second_key = self.root / "release-key-two"
+        subprocess.run(
+            ["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", str(self.second_key)],
+            check=True,
+        )
         public = (self.key.with_suffix(".pub")).read_text(encoding="utf-8").strip()
+        second_public = (self.second_key.with_suffix(".pub")).read_text(encoding="utf-8").strip()
         self.allowed = self.root / "allowed_signers"
-        self.allowed.write_text(f"release-operator {public}\n", encoding="utf-8")
+        self.allowed.write_text(
+            f"release-operator {public}\nsecond-operator {second_public}\n", encoding="utf-8"
+        )
         subprocess.run(
             [
                 "ssh-keygen",
@@ -163,6 +171,42 @@ class ReleaseControlTests(unittest.TestCase):
         value = dict(self.intent, surprise=True)
         with self.assertRaisesRegex(rc.ContractError, "unknown fields"):
             rc.validate_intent_value(value, self.policy, now=self.now)
+
+    def test_single_operator_key_is_rejected_before_signature_verification(self) -> None:
+        single = self.root / "single-operator-signers"
+        single.write_text(self.allowed.read_text(encoding="utf-8").splitlines()[0] + "\n", encoding="utf-8")
+        with self.assertRaisesRegex(rc.ContractError, "at least two distinct named operator keys"):
+            rc.validate_intent(
+                self.intent_path,
+                self.signature,
+                single,
+                self.policy_dir,
+                self.now,
+            )
+
+    def test_two_operator_aliases_cannot_share_one_key(self) -> None:
+        one_key = self.root / "aliased-operator-signers"
+        public = self.key.with_suffix(".pub").read_text(encoding="utf-8").strip()
+        one_key.write_text(f"release-operator,second-operator {public}\n", encoding="utf-8")
+        with self.assertRaisesRegex(rc.ContractError, "at least two distinct named operator keys"):
+            rc.validate_intent(
+                self.intent_path,
+                self.signature,
+                one_key,
+                self.policy_dir,
+                self.now,
+            )
+
+    def test_noncanonical_registry_host_is_rejected(self) -> None:
+        self.policy["registry_host"] = "registry.example.invalid"
+        self.policy["artifact_repository"] = "registry.example.invalid/arconath/example-api"
+        with self.assertRaisesRegex(rc.ContractError, "canonical internal Distribution host"):
+            rc.validate_policy(self.policy)
+
+    def test_artifact_outside_canonical_namespace_is_rejected(self) -> None:
+        self.policy["artifact_repository"] = "registry.arconath.internal/other/example-api"
+        with self.assertRaisesRegex(rc.ContractError, "canonical arconath/ namespace"):
+            rc.validate_policy(self.policy)
 
     def test_registry_repository_traversal_is_rejected(self) -> None:
         self.intent["artifact"]["repository"] = (

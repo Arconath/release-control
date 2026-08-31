@@ -8,6 +8,17 @@ publish credentials, publish and sign the exact candidate digest to the
 self-hosted Arconath Distribution registry, and emit a promotion plus rollback
 manifest. GHCR is an optional mirror, never the canonical deployment source.
 
+Release policies accept only the private Distribution namespace
+`registry.arconath.internal/arconath/`. The registry boundary is HTTPS with
+OCI Distribution bearer-token authentication. Its token issuer publishes
+public Ed25519 verification keys through the reviewed registry-JWKS contract
+implemented by `platform/components/registry-jwks`; private signing keys and
+registry credentials never belong in this repository. GitOps must verify the
+same registry host, digest, signature, provenance, and rollback evidence before
+admission. A policy pointing at GHCR, another registry, a port alias, or a
+repository outside the `arconath/` namespace is rejected before source fetch
+or publication.
+
 This repository does **not** deploy workloads. `Arconath/platform-apps` remains
 the owner of environment state and must consume the signed promotion manifest
 through its own reviewed admission process.
@@ -96,6 +107,8 @@ The workflow is fail-closed until an administrator configures:
   bounded candidate decryption step. The job fails before login if any value
   is absent.
 - At least two reviewed operator public keys in `policies/release-signers`.
+  The verifier rejects a release when fewer than two distinct named keys are
+  present, even if the submitted intent is signed by the remaining key.
 
 The organization currently has only the bootstrap operator `@hermawan22`.
 Before enabling a product policy or adding publication secrets, invite a second
