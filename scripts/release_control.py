@@ -37,6 +37,10 @@ HANDOFF_FILES = {
     "source": "product.tar.age",
     "candidate": "candidate.oci.tar.age",
 }
+HANDOFF_PLAINTEXT_FILES = {
+    "source": "product.tar",
+    "candidate": "candidate.oci.tar",
+}
 
 
 class ContractError(ValueError):
@@ -423,6 +427,8 @@ def create_handoff(
     expected_name = HANDOFF_FILES[kind]
     if ciphertext.name != expected_name:
         die(f"source handoff ciphertext must be named {expected_name}")
+    if plaintext.name != HANDOFF_PLAINTEXT_FILES[kind]:
+        die(f"source handoff plaintext must be named {HANDOFF_PLAINTEXT_FILES[kind]}")
     if not plaintext.is_file() or not ciphertext.is_file():
         die("source handoff plaintext and ciphertext must be regular files")
     value = {
@@ -478,6 +484,8 @@ def verify_handoff(
     if sha256_file(ciphertext_path) != value["ciphertext"]["sha256"]:
         die("source handoff ciphertext SHA-256 differs from its envelope")
     if plaintext_path is not None:
+        if plaintext_path.name != HANDOFF_PLAINTEXT_FILES[kind]:
+            die("decrypted source handoff path is not canonical")
         if not plaintext_path.is_file() or plaintext_path.is_symlink():
             die("decrypted source handoff must be a regular file")
         if sha256_file(plaintext_path) != value["plaintext_sha256"]:
