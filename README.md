@@ -138,6 +138,13 @@ the repository, canonical registry host, build context, Dockerfile, platform,
 and package destination. An optional mirror must copy from the already signed
 canonical digest, verify digest equality, and must never become a GitOps input.
 
+Platform extensions use the same boundary. The five disabled
+`platform-*` policies bind `Arconath/platform-components` to each component's
+context, Containerfile, digest-pinned upstream inputs, contract test, and
+Distribution repository. Enabling one is a protected release-control change;
+the component repository remains validation-only and never receives registry,
+Cosign, OIDC, or promotion credentials.
+
 ## Verification
 
 ```sh
