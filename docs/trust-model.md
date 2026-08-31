@@ -8,6 +8,11 @@
 - GitHub's OIDC identity for this exact workflow on `refs/heads/main`.
 - The configured private Distribution endpoint and its TLS trust chain.
 
+Production activation requires two distinct named GitHub reviewers and two
+distinct allowlisted intent-signing keys. The bootstrap repository contains
+only `@hermawan22`; a second real operator must replace this documented gap.
+The two-approval branch rule deliberately blocks policy changes until then.
+
 Product source and every artifact it creates remain untrusted data. Product
 source runs only in `build-test`, which has no source-reader secret, registry
 secret, OIDC token, package permission, or deployment credential.

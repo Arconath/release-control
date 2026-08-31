@@ -20,13 +20,13 @@
     "dismiss_stale_reviews": true,
     "enforce_admins": true,
     "linear_history": true,
-    "required_approvals": 1,
+    "required_approvals": 2,
     "required_checks": [
       "contracts and workflow policy"
     ],
     "require_code_owner_review": true,
     "require_last_push_approval": true,
-    "require_signed_commits": false,
+    "require_signed_commits": true,
     "strict_checks": true
   },
   "repository": {

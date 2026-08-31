@@ -65,7 +65,7 @@ uses the explicitly documented empty baseline digest, not a missing field.
 The workflow is fail-closed until an administrator configures:
 
 - Repository visibility: public.
-- Protected `main`: pull request required, one approval, stale approvals
+- Protected `main`: pull request required, two approvals, stale approvals
   dismissed, approval after last push, conversation resolution, required
   `validate / contracts and workflow policy`, linear history, force-push and
   deletion disabled, administrators enforced.
@@ -79,6 +79,13 @@ The workflow is fail-closed until an administrator configures:
   protected `publication` environment for a robot account restricted to
   allowlisted repositories. The job fails before login if any value is absent.
 - At least two reviewed operator public keys in `policies/release-signers`.
+
+The organization currently has only the bootstrap operator `@hermawan22`.
+Before enabling a product policy or adding publication secrets, invite a second
+named operator, add that user explicitly to `CODEOWNERS`, and register a
+separate release-intent public key. No organization team is used as a hidden
+substitute. Main intentionally remains fail-closed at two approvals until that
+second operator exists.
 
 Do not add a personal access token. The source GitHub App token is short-lived
 and repository scoped. Registry robot credentials stay only in the publication
