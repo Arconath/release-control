@@ -112,12 +112,21 @@ The workflow is fail-closed until an administrator configures:
   rejects a release when the file is empty, contains another identity, aliases,
   or more than one key. No organization team is used as a hidden substitute.
 
+The checked-in signer policy is intentionally keyless until the operator
+performs the offline bootstrap in
+[`docs/operator-key-bootstrap.md`](docs/operator-key-bootstrap.md). Therefore
+validation can prove the contract, but no release intent can verify or publish
+until the real `hermawan22` public key is added through a reviewed change. A
+loaded SSH-agent key is not sufficient evidence and is never copied into this
+repository; the private key remains on the operator's protected workstation or
+hardware-backed keystore.
+
 This single-operator policy is an explicit bootstrap trade-off: the intent is
 signed by `hermawan22`, manual review is recorded in the release evidence, and
-every privileged job revalidates the protected control SHA. GitHub Free does
-not provide server-enforced two-person separation here. Add a separately
-reviewed operator only through a policy change if that requirement returns;
-never silently widen the allowlist.
+every privileged job revalidates the protected control SHA. No second operator
+or hidden team is required by this bootstrap policy. GitHub Free does not
+provide server-enforced two-person separation here; adding another operator is
+a deliberate policy change, never an implicit workaround.
 
 Do not add a personal access token. The source GitHub App token is short-lived
 and repository scoped. Age transport identities are separate from the source

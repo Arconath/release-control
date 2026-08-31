@@ -13,6 +13,10 @@ allowlisted intent-signing key. This is an explicit bootstrap policy, not a
 claim of two-person separation. GitHub Free requires the pull request and
 strict status/signed-commit controls but does not enforce a reviewer count;
 manual review must be recorded before the operator merges and signs an intent.
+The repository is intentionally keyless until the offline procedure in
+`docs/operator-key-bootstrap.md` installs the real public key. An SSH-agent
+identity on a workstation is not a substitute for that reviewed policy line,
+and no private key is ever stored in this repository or on a runner.
 Every privileged job revalidates the exact protected control SHA before
 crossing its credential boundary.
 

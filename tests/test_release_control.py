@@ -137,6 +137,21 @@ class ReleaseControlTests(unittest.TestCase):
         self.assertEqual(intent["source"]["tree_sha"], "3" * 40)
         self.assertEqual(policy["artifact_repository"], intent["artifact"]["repository"])
 
+    def test_validate_signers_cli_accepts_one_operator_key(self) -> None:
+        result = subprocess.run(
+            [
+                "python3",
+                str(MODULE_PATH),
+                "validate-signers",
+                "--allowed-signers",
+                str(self.allowed),
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_tampered_tree_is_rejected_by_signature(self) -> None:
         tampered = dict(self.intent)
         tampered["source"] = dict(self.intent["source"], tree_sha="5" * 40)

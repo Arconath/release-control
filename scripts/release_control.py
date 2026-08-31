@@ -898,6 +898,9 @@ def main() -> int:
     intent_parser.add_argument("--now")
     intent_parser.add_argument("--github-output", type=Path)
 
+    signer_parser = sub.add_parser("validate-signers")
+    signer_parser.add_argument("--allowed-signers", type=Path, required=True)
+
     evidence_parser = sub.add_parser("build-evidence")
     evidence_parser.add_argument("--intent", type=Path, required=True)
     evidence_parser.add_argument("--archive", type=Path, required=True)
@@ -971,6 +974,8 @@ def main() -> int:
             )
             if args.github_output:
                 emit_outputs(args.github_output, intent, policy)
+        elif args.command == "validate-signers":
+            require_single_operator_key(args.allowed_signers)
         elif args.command == "build-evidence":
             write_json(args.output, build_evidence(load_json(args.intent), args.archive))
         elif args.command == "provenance":
