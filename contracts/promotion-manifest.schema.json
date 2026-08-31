@@ -3,10 +3,11 @@
   "title": "Arconath promotion manifest",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema_version", "intent_id", "source", "artifact", "rollback_digest"],
+  "required": ["schema_version", "intent_id", "release_control_sha", "source", "artifact", "rollback_digest"],
   "properties": {
     "schema_version": {"const": 1},
     "intent_id": {"type": "string"},
+    "release_control_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
     "source": {"type": "object"},
     "artifact": {"type": "object"},
     "rollback_digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}

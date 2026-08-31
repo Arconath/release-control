@@ -17,6 +17,7 @@ from typing import Any
 
 SHA = re.compile(r"^[0-9a-f]{40}$")
 DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
+GIT_SHA = re.compile(r"^[0-9a-f]{40}$")
 IDENT = re.compile(r"^[a-z0-9][a-z0-9._@-]{1,127}$")
 POLICY_ID = re.compile(r"^[a-z0-9][a-z0-9-]{1,62}$")
 INTENT_ID = re.compile(r"^[a-z0-9][a-z0-9._-]{7,127}$")
@@ -343,8 +344,14 @@ def validate_build_evidence(value: dict[str, Any], intent: dict[str, Any]) -> No
 
 
 def verify_published(
-    intent: dict[str, Any], evidence: dict[str, Any], archive: Path, published_digest: str
+    intent: dict[str, Any],
+    evidence: dict[str, Any],
+    archive: Path,
+    published_digest: str,
+    release_control_sha: str,
 ) -> dict[str, Any]:
+    if not GIT_SHA.fullmatch(release_control_sha):
+        die("release-control SHA must be a 40-character lowercase Git SHA")
     validate_build_evidence(evidence, intent)
     require_string(published_digest, DIGEST, "published digest")
     archive_digest, archive_hash = inspect_oci_archive(archive)
@@ -357,6 +364,7 @@ def verify_published(
     return {
         "schema_version": 1,
         "intent_id": intent["intent_id"],
+        "release_control_sha": release_control_sha,
         "source": intent["source"],
         "artifact": {
             "repository": intent["artifact"]["repository"],
@@ -369,17 +377,28 @@ def verify_published(
 
 
 def release_manifests(
-    intent: dict[str, Any], record: dict[str, Any], expected_digest: str | None = None
+    intent: dict[str, Any],
+    record: dict[str, Any],
+    expected_digest: str | None = None,
+    release_control_sha: str | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     strict_keys(
         record,
-        {"schema_version", "intent_id", "source", "artifact", "oci_archive_sha256"},
+        {"schema_version", "intent_id", "release_control_sha", "source", "artifact", "oci_archive_sha256"},
         "release record",
     )
     if record["schema_version"] != 1:
         die("unsupported release record schema_version")
     if record.get("intent_id") != intent["intent_id"] or record.get("source") != intent["source"]:
         die("release record identity does not match intent")
+    record_control_sha = record.get("release_control_sha")
+    if not isinstance(record_control_sha, str) or not GIT_SHA.fullmatch(record_control_sha):
+        die("release record release-control SHA is invalid")
+    if release_control_sha is not None:
+        if not GIT_SHA.fullmatch(release_control_sha):
+            die("release-control SHA must be a 40-character lowercase Git SHA")
+        if record_control_sha != release_control_sha:
+            die("release record release-control SHA does not match the protected workflow SHA")
     artifact = record.get("artifact")
     if not isinstance(artifact, dict):
         die("release record artifact missing")
@@ -405,6 +424,7 @@ def release_manifests(
     promotion = {
         "schema_version": 1,
         "intent_id": intent["intent_id"],
+        "release_control_sha": record_control_sha,
         "source": intent["source"],
         "artifact": {
             "repository": artifact["repository"],
@@ -417,6 +437,7 @@ def release_manifests(
     rollback = {
         "schema_version": 1,
         "intent_id": intent["intent_id"],
+        "release_control_sha": record_control_sha,
         "artifact_repository": artifact["repository"],
         "replace_digest": digest,
         "restore_digest": previous,
@@ -487,6 +508,7 @@ def main() -> int:
     verify_parser.add_argument("--evidence", type=Path, required=True)
     verify_parser.add_argument("--archive", type=Path, required=True)
     verify_parser.add_argument("--published-digest", required=True)
+    verify_parser.add_argument("--release-control-sha", required=True)
     verify_parser.add_argument("--output", type=Path, required=True)
 
     manifest_parser = sub.add_parser("emit-manifests")
@@ -495,6 +517,7 @@ def main() -> int:
     manifest_parser.add_argument("--promotion", type=Path, required=True)
     manifest_parser.add_argument("--rollback", type=Path, required=True)
     manifest_parser.add_argument("--expected-digest", required=True)
+    manifest_parser.add_argument("--release-control-sha", required=True)
 
     command_parser = sub.add_parser("run-policy")
     command_parser.add_argument("--policy", type=Path, required=True)
@@ -528,11 +551,15 @@ def main() -> int:
                     load_json(args.evidence),
                     args.archive,
                     args.published_digest,
+                    args.release_control_sha,
                 ),
             )
         elif args.command == "emit-manifests":
             promotion, rollback = release_manifests(
-                load_json(args.intent), load_json(args.release_record), args.expected_digest
+                load_json(args.intent),
+                load_json(args.release_record),
+                args.expected_digest,
+                args.release_control_sha,
             )
             write_json(args.promotion, promotion)
             write_json(args.rollback, rollback)

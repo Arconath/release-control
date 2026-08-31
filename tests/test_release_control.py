@@ -15,6 +15,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
+RELEASE_CONTROL_SHA = "a" * 40
 MODULE_PATH = ROOT / "scripts" / "release_control.py"
 SPEC = importlib.util.spec_from_file_location("release_control", MODULE_PATH)
 assert SPEC and SPEC.loader
@@ -184,9 +185,10 @@ class ReleaseControlTests(unittest.TestCase):
         archive = self.make_oci()
         evidence = rc.build_evidence(self.intent, archive)
         record = rc.verify_published(
-            self.intent, evidence, archive, "sha256:" + "4" * 64
+            self.intent, evidence, archive, "sha256:" + "4" * 64, RELEASE_CONTROL_SHA
         )
         self.assertEqual(record["artifact"]["digest"], evidence["artifact"]["digest"])
+        self.assertEqual(record["release_control_sha"], RELEASE_CONTROL_SHA)
         self.assertEqual(
             record["artifact"]["reference"],
             "registry.arconath.internal/arconath/example-api@sha256:" + "4" * 64,
@@ -198,28 +200,30 @@ class ReleaseControlTests(unittest.TestCase):
         with archive.open("ab") as handle:
             handle.write(b"tamper")
         with self.assertRaisesRegex(rc.ContractError, "archive SHA-256 differs"):
-            rc.verify_published(self.intent, evidence, archive, "sha256:" + "4" * 64)
+            rc.verify_published(self.intent, evidence, archive, "sha256:" + "4" * 64, RELEASE_CONTROL_SHA)
 
     def test_published_digest_mismatch_is_rejected(self) -> None:
         archive = self.make_oci()
         evidence = rc.build_evidence(self.intent, archive)
         with self.assertRaisesRegex(rc.ContractError, "published digest differs"):
-            rc.verify_published(self.intent, evidence, archive, "sha256:" + "5" * 64)
+            rc.verify_published(self.intent, evidence, archive, "sha256:" + "5" * 64, RELEASE_CONTROL_SHA)
 
     def test_promotion_and_rollback_are_bound_to_exact_digest(self) -> None:
         archive = self.make_oci()
         evidence = rc.build_evidence(self.intent, archive)
-        record = rc.verify_published(self.intent, evidence, archive, "sha256:" + "4" * 64)
+        record = rc.verify_published(self.intent, evidence, archive, "sha256:" + "4" * 64, RELEASE_CONTROL_SHA)
         promotion, rollback = rc.release_manifests(self.intent, record)
         self.assertEqual(promotion["artifact"]["digest"], "sha256:" + "4" * 64)
         self.assertEqual(promotion["rollback_digest"], "sha256:" + "1" * 64)
+        self.assertEqual(promotion["release_control_sha"], RELEASE_CONTROL_SHA)
         self.assertEqual(rollback["replace_digest"], "sha256:" + "4" * 64)
         self.assertEqual(rollback["restore_digest"], "sha256:" + "1" * 64)
+        self.assertEqual(rollback["release_control_sha"], RELEASE_CONTROL_SHA)
 
     def test_rollback_must_not_point_to_new_release(self) -> None:
         archive = self.make_oci()
         evidence = rc.build_evidence(self.intent, archive)
-        record = rc.verify_published(self.intent, evidence, archive, "sha256:" + "4" * 64)
+        record = rc.verify_published(self.intent, evidence, archive, "sha256:" + "4" * 64, RELEASE_CONTROL_SHA)
         self.intent["rollback"]["previous_digest"] = "sha256:" + "4" * 64
         with self.assertRaisesRegex(rc.ContractError, "must differ"):
             rc.release_manifests(self.intent, record)
@@ -227,7 +231,7 @@ class ReleaseControlTests(unittest.TestCase):
     def test_promotion_rejects_digest_different_from_publish_job(self) -> None:
         archive = self.make_oci()
         evidence = rc.build_evidence(self.intent, archive)
-        record = rc.verify_published(self.intent, evidence, archive, "sha256:" + "4" * 64)
+        record = rc.verify_published(self.intent, evidence, archive, "sha256:" + "4" * 64, RELEASE_CONTROL_SHA)
         with self.assertRaisesRegex(rc.ContractError, "publish job output"):
             rc.release_manifests(self.intent, record, "sha256:" + "5" * 64)
 

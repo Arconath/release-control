@@ -3,10 +3,11 @@
   "title": "Arconath rollback manifest",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema_version", "intent_id", "artifact_repository", "replace_digest", "restore_digest", "reason"],
+  "required": ["schema_version", "intent_id", "release_control_sha", "artifact_repository", "replace_digest", "restore_digest", "reason"],
   "properties": {
     "schema_version": {"const": 1},
     "intent_id": {"type": "string"},
+    "release_control_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
     "artifact_repository": {"type": "string"},
     "replace_digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
     "restore_digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},

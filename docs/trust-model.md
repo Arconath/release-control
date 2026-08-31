@@ -49,11 +49,13 @@ candidate is never admissible.
 
 ## Promotion and rollback
 
-Promotion emits a digest-only manifest. Rollback is generated in the same run
+Promotion emits a digest-only manifest and the exact protected
+`release_control_sha` that generated it. Rollback is generated in the same run
 and identifies both the digest being replaced and the previously verified
 digest to restore. Neither document changes platform desired state. GitOps must
-verify the Sigstore bundle, release-control workflow identity, source/tree
-identity, artifact digest, and rollback digest before opening a deployment PR.
+verify the Sigstore bundle, release-control workflow identity and SHA,
+source/tree identity, artifact digest, and rollback digest before opening a
+deployment PR.
 
 GHCR mirroring, if later enabled, copies from the signed canonical Distribution
 digest and proves digest equality. A mirror tag or digest is never accepted as
