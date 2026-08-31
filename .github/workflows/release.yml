@@ -78,6 +78,13 @@ jobs:
     permissions:
       contents: read
     steps:
+      - name: Check out protected handoff verifier
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          path: control
+          persist-credentials: false
+
       - name: Mint source-only GitHub App token
         id: source-token
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
@@ -111,8 +118,37 @@ jobs:
           actual_tree="$(git -C product rev-parse 'HEAD^{tree}')"
           [[ "$actual_sha" == "$EXPECTED_SHA" ]] || { printf 'Source commit mismatch.\n' >&2; exit 1; }
           [[ "$actual_tree" == "$EXPECTED_TREE" ]] || { printf 'Source tree mismatch.\n' >&2; exit 1; }
-          git -C product archive --format=tar --prefix=product/ HEAD > product.tar
-          printf '%s  product.tar\n' "$(sha256sum product.tar | cut -d' ' -f1)" > product.tar.sha256
+          handoff_dir='release-transport/source-handoff'
+          rm -rf -- "$handoff_dir"
+          install -d -m 0700 "$handoff_dir"
+          git -C product archive --format=tar --prefix=product/ HEAD > "$handoff_dir/product.tar"
+
+      - name: Encrypt source before artifact transport
+        shell: bash
+        env:
+          SOURCE_HANDOFF_AGE_RECIPIENT: ${{ vars.SOURCE_HANDOFF_AGE_RECIPIENT }}
+          INTENT_PATH: ${{ inputs.intent_path }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          set -Eeuo pipefail
+          command -v age >/dev/null || { printf 'age is required on arconath-jit runners.\n' >&2; exit 1; }
+          [[ -n "$SOURCE_HANDOFF_AGE_RECIPIENT" ]] || {
+            printf 'SOURCE_HANDOFF_AGE_RECIPIENT is not configured.\n' >&2
+            exit 1
+          }
+          handoff_dir='release-transport/source-handoff'
+          age --encrypt --recipient "$SOURCE_HANDOFF_AGE_RECIPIENT" \
+            --output "$handoff_dir/product.tar.age" "$handoff_dir/product.tar"
+          (cd "$handoff_dir" && sha256sum product.tar.age) > "$handoff_dir/product.tar.age.sha256"
+          python3 control/scripts/release_control.py create-handoff \
+            --kind source \
+            --intent "control/$INTENT_PATH" \
+            --run-id "$RUN_ID" \
+            --plaintext "$handoff_dir/product.tar" \
+            --ciphertext "$handoff_dir/product.tar.age" \
+            --recipient "$SOURCE_HANDOFF_AGE_RECIPIENT" \
+            --output "$handoff_dir/source-handoff.json"
+          rm -f -- "$handoff_dir/product.tar"
 
       - name: Revoke source-reader token before artifact handoff
         if: ${{ always() && steps.source-token.outputs.token != '' }}
@@ -133,14 +169,21 @@ jobs:
         with:
           name: product-source-${{ needs.validate-intent.outputs.intent-id }}
           path: |
-            product.tar
-            product.tar.sha256
+            release-transport/source-handoff/product.tar.age
+            release-transport/source-handoff/product.tar.age.sha256
+            release-transport/source-handoff/source-handoff.json
           if-no-files-found: error
           retention-days: 1
+
+      - name: Remove source checkout and plaintext transport
+        if: ${{ always() }}
+        shell: bash
+        run: rm -rf -- product release-transport
 
   build-test:
     name: Build and test without release credentials
     needs: [validate-intent, source-fetch]
+    environment: source-handoff
     runs-on:
       group: arconath-jit
       labels: [self-hosted, linux, x64, arconath-jit, rootless-buildkit]
@@ -162,10 +205,55 @@ jobs:
 
       - name: Verify and unpack source transport
         shell: bash
+        env:
+          INTENT_PATH: ${{ inputs.intent_path }}
+          RUN_ID: ${{ github.run_id }}
+          SOURCE_HANDOFF_AGE_RECIPIENT: ${{ vars.SOURCE_HANDOFF_AGE_RECIPIENT }}
         run: |
           set -Eeuo pipefail
-          (cd transport && sha256sum --check product.tar.sha256)
+          command -v age >/dev/null || { printf 'age is required on arconath-jit runners.\n' >&2; exit 1; }
+          (cd transport && sha256sum --strict --check product.tar.age.sha256)
+          python3 control/scripts/release_control.py verify-handoff \
+            --kind source \
+            --handoff transport/source-handoff.json \
+            --intent "control/$INTENT_PATH" \
+            --run-id "$RUN_ID" \
+            --ciphertext transport/product.tar.age \
+            --recipient "$SOURCE_HANDOFF_AGE_RECIPIENT"
+
+      - name: Decrypt source only in the bounded handoff step
+        shell: bash
+        env:
+          SOURCE_HANDOFF_AGE_IDENTITY: ${{ secrets.SOURCE_HANDOFF_AGE_IDENTITY }}
+          INTENT_PATH: ${{ inputs.intent_path }}
+          RUN_ID: ${{ github.run_id }}
+          SOURCE_HANDOFF_AGE_RECIPIENT: ${{ vars.SOURCE_HANDOFF_AGE_RECIPIENT }}
+        run: |
+          set -Eeuo pipefail
+          [[ -n "$SOURCE_HANDOFF_AGE_IDENTITY" ]] || {
+            printf 'SOURCE_HANDOFF_AGE_IDENTITY is not configured.\n' >&2
+            exit 1
+          }
+          identity_file="$RUNNER_TEMP/source-handoff-identity"
+          umask 077
+          trap 'rm -f -- "$identity_file"' EXIT
+          printf '%s\n' "$SOURCE_HANDOFF_AGE_IDENTITY" > "$identity_file"
+          age --decrypt --identity "$identity_file" \
+            --output transport/product.tar transport/product.tar.age
+          python3 control/scripts/release_control.py verify-handoff \
+            --kind source \
+            --handoff transport/source-handoff.json \
+            --intent "control/$INTENT_PATH" \
+            --run-id "$RUN_ID" \
+            --ciphertext transport/product.tar.age \
+            --recipient "$SOURCE_HANDOFF_AGE_RECIPIENT" \
+            --plaintext transport/product.tar
+          rm -f -- transport/product.tar.age transport/product.tar.age.sha256 \
+            transport/source-handoff.json "$identity_file"
+          unset SOURCE_HANDOFF_AGE_IDENTITY
+          trap - EXIT
           tar --extract --file transport/product.tar --no-same-owner --no-same-permissions
+          rm -f -- transport/product.tar
 
       - name: Run centrally approved product verification
         shell: bash
@@ -231,13 +319,52 @@ jobs:
             --archive candidate/candidate.oci.tar \
             --output candidate/build-evidence.json
 
+      - name: Encrypt OCI candidate before artifact transport
+        shell: bash
+        env:
+          CANDIDATE_HANDOFF_AGE_RECIPIENT: ${{ vars.CANDIDATE_HANDOFF_AGE_RECIPIENT }}
+          INTENT_PATH: ${{ inputs.intent_path }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          set -Eeuo pipefail
+          command -v age >/dev/null || { printf 'age is required on arconath-jit runners.\n' >&2; exit 1; }
+          [[ -n "$CANDIDATE_HANDOFF_AGE_RECIPIENT" ]] || {
+            printf 'CANDIDATE_HANDOFF_AGE_RECIPIENT is not configured.\n' >&2
+            exit 1
+          }
+          age --encrypt --recipient "$CANDIDATE_HANDOFF_AGE_RECIPIENT" \
+            --output candidate/candidate.oci.tar.age candidate/candidate.oci.tar
+          (cd candidate && sha256sum candidate.oci.tar.age) > candidate/candidate.oci.tar.age.sha256
+          python3 control/scripts/release_control.py create-handoff \
+            --kind candidate \
+            --intent candidate/release-intent.json \
+            --run-id "$RUN_ID" \
+            --plaintext candidate/candidate.oci.tar \
+            --ciphertext candidate/candidate.oci.tar.age \
+            --recipient "$CANDIDATE_HANDOFF_AGE_RECIPIENT" \
+            --output candidate/candidate-handoff.json
+          rm -f -- candidate/candidate.oci.tar
+
       - name: Upload non-published release candidate
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: release-candidate-${{ needs.validate-intent.outputs.intent-id }}
-          path: candidate/
+          path: |
+            candidate/candidate.oci.tar.age
+            candidate/candidate.oci.tar.age.sha256
+            candidate/candidate-handoff.json
+            candidate/release-intent.json
+            candidate/release-intent.json.sig
+            candidate/build-evidence.json
+            candidate/sbom.spdx.json
+            candidate/vulnerabilities.json
           if-no-files-found: error
           retention-days: 1
+
+      - name: Remove plaintext source and candidate
+        if: ${{ always() }}
+        shell: bash
+        run: rm -rf -- product transport candidate/candidate.oci.tar .release-work
 
   publish-sign:
     name: Publish and sign exact digest
@@ -298,6 +425,56 @@ jobs:
           grep -Fqx "source-sha=$SOURCE_SHA" "$output"
           grep -Fqx "source-tree=$SOURCE_TREE" "$output"
           grep -Fqx "artifact-repository=$ARTIFACT_REPOSITORY" "$output"
+
+      - name: Verify encrypted candidate handoff
+        shell: bash
+        env:
+          CANDIDATE_HANDOFF_AGE_RECIPIENT: ${{ vars.CANDIDATE_HANDOFF_AGE_RECIPIENT }}
+          INTENT_PATH: ${{ inputs.intent_path }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          set -Eeuo pipefail
+          command -v age >/dev/null || { printf 'age is required on arconath-jit runners.\n' >&2; exit 1; }
+          (cd candidate && sha256sum --strict --check candidate.oci.tar.age.sha256)
+          python3 control/scripts/release_control.py verify-handoff \
+            --kind candidate \
+            --handoff candidate/candidate-handoff.json \
+            --intent "control/$INTENT_PATH" \
+            --run-id "$RUN_ID" \
+            --ciphertext candidate/candidate.oci.tar.age \
+            --recipient "$CANDIDATE_HANDOFF_AGE_RECIPIENT"
+
+      - name: Decrypt candidate only after identity revalidation
+        shell: bash
+        env:
+          CANDIDATE_HANDOFF_AGE_IDENTITY: ${{ secrets.CANDIDATE_HANDOFF_AGE_IDENTITY }}
+          CANDIDATE_HANDOFF_AGE_RECIPIENT: ${{ vars.CANDIDATE_HANDOFF_AGE_RECIPIENT }}
+          INTENT_PATH: ${{ inputs.intent_path }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          set -Eeuo pipefail
+          [[ -n "$CANDIDATE_HANDOFF_AGE_IDENTITY" ]] || {
+            printf 'CANDIDATE_HANDOFF_AGE_IDENTITY is not configured.\n' >&2
+            exit 1
+          }
+          identity_file="$RUNNER_TEMP/candidate-handoff-identity"
+          umask 077
+          trap 'rm -f -- "$identity_file"' EXIT
+          printf '%s\n' "$CANDIDATE_HANDOFF_AGE_IDENTITY" > "$identity_file"
+          age --decrypt --identity "$identity_file" \
+            --output candidate/candidate.oci.tar candidate/candidate.oci.tar.age
+          python3 control/scripts/release_control.py verify-handoff \
+            --kind candidate \
+            --handoff candidate/candidate-handoff.json \
+            --intent "control/$INTENT_PATH" \
+            --run-id "$RUN_ID" \
+            --ciphertext candidate/candidate.oci.tar.age \
+            --recipient "$CANDIDATE_HANDOFF_AGE_RECIPIENT" \
+            --plaintext candidate/candidate.oci.tar
+          rm -f -- candidate/candidate.oci.tar.age candidate/candidate.oci.tar.age.sha256 \
+            candidate/candidate-handoff.json "$identity_file"
+          unset CANDIDATE_HANDOFF_AGE_IDENTITY
+          trap - EXIT
 
       - name: Publish or resume the exact immutable OCI digest
         id: publish
@@ -390,6 +567,11 @@ jobs:
             candidate/vulnerabilities.json
           if-no-files-found: error
           retention-days: 30
+
+      - name: Remove plaintext candidate
+        if: ${{ always() }}
+        shell: bash
+        run: rm -f -- candidate/candidate.oci.tar "$RUNNER_TEMP/candidate-handoff-identity"
 
   promote:
     name: Emit promotion and rollback evidence

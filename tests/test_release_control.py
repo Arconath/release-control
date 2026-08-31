@@ -16,6 +16,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 RELEASE_CONTROL_SHA = "a" * 40
+AGE_RECIPIENT = "age1" + "b" * 32
 MODULE_PATH = ROOT / "scripts" / "release_control.py"
 SPEC = importlib.util.spec_from_file_location("release_control", MODULE_PATH)
 assert SPEC and SPEC.loader
@@ -234,6 +235,87 @@ class ReleaseControlTests(unittest.TestCase):
         record = rc.verify_published(self.intent, evidence, archive, "sha256:" + "4" * 64, RELEASE_CONTROL_SHA)
         with self.assertRaisesRegex(rc.ContractError, "publish job output"):
             rc.release_manifests(self.intent, record, "sha256:" + "5" * 64)
+
+    def test_source_handoff_is_canonical_and_binds_ciphertext_and_run(self) -> None:
+        plaintext = self.root / "product.tar"
+        ciphertext = self.root / "product.tar.age"
+        plaintext.write_bytes(b"private source archive")
+        ciphertext.write_bytes(b"age-encrypted source archive")
+        handoff = rc.create_handoff(
+            self.intent,
+            kind="source",
+            run_id="123456789",
+            plaintext=plaintext,
+            ciphertext=ciphertext,
+            recipient=AGE_RECIPIENT,
+        )
+        handoff_path = self.root / "source-handoff.json"
+        write_json(handoff_path, handoff)
+        rc.verify_handoff(
+            handoff_path,
+            ciphertext,
+            self.intent_path,
+            kind="source",
+            run_id="123456789",
+            recipient=AGE_RECIPIENT,
+            plaintext_path=plaintext,
+        )
+        self.assertEqual(handoff["ciphertext"]["filename"], "product.tar.age")
+        self.assertEqual(handoff["ciphertext"]["encryption"], "age-v1")
+
+    def test_source_handoff_rejects_ciphertext_tampering_and_replay(self) -> None:
+        plaintext = self.root / "product.tar"
+        ciphertext = self.root / "product.tar.age"
+        plaintext.write_bytes(b"private source archive")
+        ciphertext.write_bytes(b"age-encrypted source archive")
+        handoff_path = self.root / "source-handoff.json"
+        write_json(
+            handoff_path,
+            rc.create_handoff(
+                self.intent,
+                kind="source",
+                run_id="123456789",
+                plaintext=plaintext,
+                ciphertext=ciphertext,
+                recipient=AGE_RECIPIENT,
+            ),
+        )
+        ciphertext.write_bytes(b"tampered ciphertext")
+        with self.assertRaisesRegex(rc.ContractError, "ciphertext SHA-256 differs"):
+            rc.verify_handoff(
+                handoff_path,
+                ciphertext,
+                self.intent_path,
+                kind="source",
+                run_id="123456789",
+                recipient=AGE_RECIPIENT,
+            )
+        ciphertext.write_bytes(b"age-encrypted source archive")
+        with self.assertRaisesRegex(rc.ContractError, "run_id does not match"):
+            rc.verify_handoff(
+                handoff_path,
+                ciphertext,
+                self.intent_path,
+                kind="source",
+                run_id="987654321",
+                recipient=AGE_RECIPIENT,
+            )
+
+    def test_candidate_handoff_uses_a_distinct_canonical_filename(self) -> None:
+        plaintext = self.root / "candidate.oci.tar"
+        ciphertext = self.root / "candidate.oci.tar.age"
+        plaintext.write_bytes(b"oci archive")
+        ciphertext.write_bytes(b"age-encrypted oci archive")
+        handoff = rc.create_handoff(
+            self.intent,
+            kind="candidate",
+            run_id="123456789",
+            plaintext=plaintext,
+            ciphertext=ciphertext,
+            recipient=AGE_RECIPIENT,
+        )
+        self.assertEqual(handoff["handoff_type"], "candidate")
+        self.assertEqual(handoff["ciphertext"]["filename"], "candidate.oci.tar.age")
 
 
 if __name__ == "__main__":

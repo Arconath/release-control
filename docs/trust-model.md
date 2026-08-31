@@ -14,28 +14,37 @@ only `@hermawan22`; a second real operator must replace this documented gap.
 The two-approval branch rule deliberately blocks policy changes until then.
 
 Product source and every artifact it creates remain untrusted data. Product
-source runs only in `build-test`, which has no source-reader secret, registry
-secret, OIDC token, package permission, or deployment credential.
+source runs only in `build-test`. The source archive and OCI candidate cross
+job boundaries only as age-encrypted ciphertext with a canonical envelope bound
+to the intent, exact source identity, and GitHub run ID. A dedicated handoff
+identity is injected for one bounded decrypt step and is unset before any
+product verification or build command; it is not a source-reader, registry,
+OIDC, package, or deployment credential.
 
 ## Credential compartments
 
 | Job | Credential | Authority |
 |---|---|---|
 | validate-intent | read-only job token | protected release-control source |
-| source-fetch | short-lived GitHub App token | one approved source repository, contents read |
-| build-test | none | artifact transport only |
-| publish-sign | protected registry robot + GitHub OIDC | one policy-bound registry repository and signatures |
+| source-fetch | short-lived GitHub App token + public age recipient | one approved source repository, contents read; encrypted transport only |
+| build-test | protected source-handoff age identity for one decrypt step | encrypted source transport; no source-reader, registry, OIDC, package, or deployment authority |
+| publish-sign | protected registry robot + candidate-handoff age identity + GitHub OIDC | one policy-bound registry repository and signatures; candidate decrypt only after identity revalidation |
 | promote | GitHub contents write + GitHub OIDC | release-control evidence release only |
 
-The publication job never extracts or executes product source. The promotion
-job has no source or registry credential and cannot deploy.
+The publication job never extracts or executes product source. It decrypts only
+the OCI candidate after the signed identity boundary has been revalidated; the
+candidate handoff identity is removed before registry login. The promotion job
+has no source, handoff, or registry credential and cannot deploy.
 
 ## Fail-closed cases
 
 The release stops before publication when the intent is absent, non-canonical,
 expired, signed by an unknown key, or mismatched with policy; the source commit
-or tree differs; registry host or robot credentials are absent; tests or the
-vulnerability gate fail; or the OCI archive changes in transit.
+or tree differs; a handoff recipient, run ID, ciphertext hash, decrypted hash,
+or canonical filename differs; age is unavailable; registry host or robot
+credentials are absent; tests or the vulnerability gate fail; or the OCI
+archive changes in transit. A missing handoff identity fails closed before
+source or candidate use.
 
 Validation, publication, and promotion each re-read the remote protected
 `main` SHA. A rerun of an old workflow or a release whose control policy was
@@ -56,6 +65,11 @@ digest to restore. Neither document changes platform desired state. GitOps must
 verify the Sigstore bundle, release-control workflow identity and SHA,
 source/tree identity, artifact digest, and rollback digest before opening a
 deployment PR.
+
+GitHub Actions artifacts contain only age ciphertext for private source and
+OCI candidates; release, promotion, and SBOM evidence is digest metadata and
+does not carry the source archive. Artifact retention is intentionally short
+for transport, and runner cleanup removes plaintext before the job exits.
 
 GHCR mirroring, if later enabled, copies from the signed canonical Distribution
 digest and proves digest equality. A mirror tag or digest is never accepted as

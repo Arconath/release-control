@@ -29,8 +29,14 @@ ARTIFACT_REPO = re.compile(
     r"^(?=.{8,255}$)[a-z0-9.-]+(?::[1-9][0-9]{0,4})?(?:/[a-z0-9][a-z0-9._-]{0,127})+$"
 )
 VERSION = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?$")
+AGE_RECIPIENT = re.compile(r"^age1[a-z0-9]{20,200}$")
+RUN_ID = re.compile(r"^[1-9][0-9]{0,19}$")
 ZERO_DIGEST = "sha256:" + "0" * 64
 NAMESPACE = "arconath-release-intent"
+HANDOFF_FILES = {
+    "source": "product.tar.age",
+    "candidate": "candidate.oci.tar.age",
+}
 
 
 class ContractError(ValueError):
@@ -74,6 +80,17 @@ def require_string(value: Any, pattern: re.Pattern[str], context: str) -> str:
     if not isinstance(value, str) or not pattern.fullmatch(value):
         die(f"invalid {context}: {value!r}")
     return value
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    try:
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+    except OSError as exc:
+        die(f"cannot read file {path}: {exc}")
+    return digest.hexdigest()
 
 
 def validate_registry_host(value: Any, context: str = "registry_host") -> str:
@@ -320,6 +337,153 @@ def build_evidence(intent: dict[str, Any], archive: Path) -> dict[str, Any]:
     }
 
 
+def _handoff_source(intent: dict[str, Any]) -> dict[str, Any]:
+    source = intent.get("source")
+    if not isinstance(source, dict):
+        die("intent source must be an object for handoff")
+    strict_keys(source, {"repository", "commit_sha", "tree_sha"}, "intent source")
+    require_string(source["repository"], SOURCE_REPO, "intent source.repository")
+    require_string(source["commit_sha"], SHA, "intent source.commit_sha")
+    require_string(source["tree_sha"], SHA, "intent source.tree_sha")
+    return source
+
+
+def _validate_handoff_value(
+    value: dict[str, Any],
+    *,
+    intent: dict[str, Any],
+    kind: str,
+    run_id: str,
+    recipient: str,
+) -> dict[str, Any]:
+    if kind not in HANDOFF_FILES:
+        die(f"unsupported handoff kind: {kind}")
+    strict_keys(
+        value,
+        {
+            "schema_version",
+            "handoff_type",
+            "intent_id",
+            "run_id",
+            "source",
+            "plaintext_sha256",
+            "ciphertext",
+        },
+        "source handoff",
+    )
+    if value["schema_version"] != 1:
+        die("unsupported source handoff schema_version")
+    if value["handoff_type"] != kind:
+        die("source handoff type does not match the expected boundary")
+    expected_intent_id = require_string(intent.get("intent_id"), INTENT_ID, "intent.intent_id")
+    if value["intent_id"] != expected_intent_id:
+        die("source handoff intent_id does not match intent")
+    expected_run_id = require_string(run_id, RUN_ID, "GitHub run id")
+    if value["run_id"] != expected_run_id:
+        die("source handoff run_id does not match this workflow run")
+    source = _handoff_source(intent)
+    if value["source"] != source:
+        die("source handoff source identity does not match intent")
+    require_string(value["plaintext_sha256"], re.compile(r"^[0-9a-f]{64}$"), "source handoff plaintext SHA-256")
+
+    ciphertext = value["ciphertext"]
+    if not isinstance(ciphertext, dict):
+        die("source handoff ciphertext must be an object")
+    strict_keys(
+        ciphertext,
+        {"filename", "sha256", "encryption", "recipient"},
+        "source handoff ciphertext",
+    )
+    expected_filename = HANDOFF_FILES[kind]
+    if ciphertext["filename"] != expected_filename:
+        die("source handoff ciphertext filename is not canonical")
+    require_string(ciphertext["sha256"], re.compile(r"^[0-9a-f]{64}$"), "source handoff ciphertext SHA-256")
+    if ciphertext["encryption"] != "age-v1":
+        die("source handoff encryption must be age-v1")
+    require_string(ciphertext["recipient"], AGE_RECIPIENT, "source handoff age recipient")
+    expected_recipient = require_string(recipient, AGE_RECIPIENT, "configured age recipient")
+    if ciphertext["recipient"] != expected_recipient:
+        die("source handoff recipient does not match the configured key")
+    return value
+
+
+def create_handoff(
+    intent: dict[str, Any],
+    *,
+    kind: str,
+    run_id: str,
+    plaintext: Path,
+    ciphertext: Path,
+    recipient: str,
+) -> dict[str, Any]:
+    if kind not in HANDOFF_FILES:
+        die(f"unsupported handoff kind: {kind}")
+    require_string(run_id, RUN_ID, "GitHub run id")
+    require_string(recipient, AGE_RECIPIENT, "configured age recipient")
+    expected_name = HANDOFF_FILES[kind]
+    if ciphertext.name != expected_name:
+        die(f"source handoff ciphertext must be named {expected_name}")
+    if not plaintext.is_file() or not ciphertext.is_file():
+        die("source handoff plaintext and ciphertext must be regular files")
+    value = {
+        "schema_version": 1,
+        "handoff_type": kind,
+        "intent_id": require_string(intent.get("intent_id"), INTENT_ID, "intent.intent_id"),
+        "run_id": run_id,
+        "source": _handoff_source(intent),
+        "plaintext_sha256": sha256_file(plaintext),
+        "ciphertext": {
+            "filename": expected_name,
+            "sha256": sha256_file(ciphertext),
+            "encryption": "age-v1",
+            "recipient": recipient,
+        },
+    }
+    _validate_handoff_value(
+        value,
+        intent=intent,
+        kind=kind,
+        run_id=run_id,
+        recipient=recipient,
+    )
+    return value
+
+
+def verify_handoff(
+    handoff_path: Path,
+    ciphertext_path: Path,
+    intent_path: Path,
+    *,
+    kind: str,
+    run_id: str,
+    recipient: str,
+    plaintext_path: Path | None = None,
+) -> None:
+    intent = load_json(intent_path)
+    require_canonical(intent_path, intent)
+    value = load_json(handoff_path)
+    require_canonical(handoff_path, value)
+    _validate_handoff_value(
+        value,
+        intent=intent,
+        kind=kind,
+        run_id=run_id,
+        recipient=recipient,
+    )
+    expected_name = HANDOFF_FILES[kind]
+    if ciphertext_path.name != expected_name:
+        die("source handoff ciphertext path is not canonical")
+    if not ciphertext_path.is_file() or ciphertext_path.is_symlink():
+        die("source handoff ciphertext must be a regular file")
+    if sha256_file(ciphertext_path) != value["ciphertext"]["sha256"]:
+        die("source handoff ciphertext SHA-256 differs from its envelope")
+    if plaintext_path is not None:
+        if not plaintext_path.is_file() or plaintext_path.is_symlink():
+            die("decrypted source handoff must be a regular file")
+        if sha256_file(plaintext_path) != value["plaintext_sha256"]:
+            die("decrypted source handoff SHA-256 differs from its envelope")
+
+
 def validate_build_evidence(value: dict[str, Any], intent: dict[str, Any]) -> None:
     strict_keys(
         value,
@@ -503,6 +667,24 @@ def main() -> int:
     evidence_parser.add_argument("--archive", type=Path, required=True)
     evidence_parser.add_argument("--output", type=Path, required=True)
 
+    create_handoff_parser = sub.add_parser("create-handoff")
+    create_handoff_parser.add_argument("--kind", choices=sorted(HANDOFF_FILES), required=True)
+    create_handoff_parser.add_argument("--intent", type=Path, required=True)
+    create_handoff_parser.add_argument("--run-id", required=True)
+    create_handoff_parser.add_argument("--plaintext", type=Path, required=True)
+    create_handoff_parser.add_argument("--ciphertext", type=Path, required=True)
+    create_handoff_parser.add_argument("--recipient", required=True)
+    create_handoff_parser.add_argument("--output", type=Path, required=True)
+
+    verify_handoff_parser = sub.add_parser("verify-handoff")
+    verify_handoff_parser.add_argument("--kind", choices=sorted(HANDOFF_FILES), required=True)
+    verify_handoff_parser.add_argument("--handoff", type=Path, required=True)
+    verify_handoff_parser.add_argument("--intent", type=Path, required=True)
+    verify_handoff_parser.add_argument("--run-id", required=True)
+    verify_handoff_parser.add_argument("--ciphertext", type=Path, required=True)
+    verify_handoff_parser.add_argument("--recipient", required=True)
+    verify_handoff_parser.add_argument("--plaintext", type=Path)
+
     verify_parser = sub.add_parser("verify-published")
     verify_parser.add_argument("--intent", type=Path, required=True)
     verify_parser.add_argument("--evidence", type=Path, required=True)
@@ -543,6 +725,30 @@ def main() -> int:
                 emit_outputs(args.github_output, intent, policy)
         elif args.command == "build-evidence":
             write_json(args.output, build_evidence(load_json(args.intent), args.archive))
+        elif args.command == "create-handoff":
+            intent = load_json(args.intent)
+            require_canonical(args.intent, intent)
+            write_json(
+                args.output,
+                create_handoff(
+                    intent,
+                    kind=args.kind,
+                    run_id=args.run_id,
+                    plaintext=args.plaintext,
+                    ciphertext=args.ciphertext,
+                    recipient=args.recipient,
+                ),
+            )
+        elif args.command == "verify-handoff":
+            verify_handoff(
+                args.handoff,
+                args.ciphertext,
+                args.intent,
+                kind=args.kind,
+                run_id=args.run_id,
+                recipient=args.recipient,
+                plaintext_path=args.plaintext,
+            )
         elif args.command == "verify-published":
             write_json(
                 args.output,
