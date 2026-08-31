@@ -974,21 +974,29 @@ def main() -> int:
         elif args.command == "build-evidence":
             write_json(args.output, build_evidence(load_json(args.intent), args.archive))
         elif args.command == "provenance":
+            intent = load_json(args.intent)
+            evidence = load_json(args.evidence)
+            require_canonical(args.intent, intent)
+            require_canonical(args.evidence, evidence)
             write_json(
                 args.output,
                 build_provenance(
-                    load_json(args.intent),
-                    load_json(args.evidence),
+                    intent,
+                    evidence,
                     args.release_control_sha,
                 ),
             )
         elif args.command == "verify-provenance":
             provenance = load_json(args.provenance)
             require_canonical(args.provenance, provenance)
+            intent = load_json(args.intent)
+            evidence = load_json(args.evidence)
+            require_canonical(args.intent, intent)
+            require_canonical(args.evidence, evidence)
             validate_provenance(
                 provenance,
-                load_json(args.intent),
-                load_json(args.evidence),
+                intent,
+                evidence,
                 args.release_control_sha,
             )
         elif args.command == "create-handoff":
