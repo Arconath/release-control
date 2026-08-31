@@ -87,6 +87,7 @@ class WorkflowPolicyTests(unittest.TestCase):
         text = (WORKFLOWS / "release.yml").read_text(encoding="utf-8")
         self.assertIn("github.ref == 'refs/heads/main'", text)
         self.assertIn("ref: ${{ github.sha }}", text)
+        self.assertEqual(text.count('[[ "$current_main" == "$GITHUB_SHA" ]]'), 3)
 
 
 if __name__ == "__main__":

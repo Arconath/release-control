@@ -37,6 +37,10 @@ expired, signed by an unknown key, or mismatched with policy; the source commit
 or tree differs; registry host or robot credentials are absent; tests or the
 vulnerability gate fail; or the OCI archive changes in transit.
 
+Validation, publication, and promotion each re-read the remote protected
+`main` SHA. A rerun of an old workflow or a release whose control policy was
+superseded is revoked before the next privileged boundary.
+
 If an exact immutable tag exists because a prior run published but failed
 before signing, the workflow resumes only when its registry digest is identical
 to the transported OCI manifest. A different digest is rejected. Consumers

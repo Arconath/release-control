@@ -51,6 +51,12 @@ jobs:
           INTENT_PATH: ${{ inputs.intent_path }}
         run: |
           set -Eeuo pipefail
+          current_main="$(git ls-remote --exit-code \
+            "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git" refs/heads/main | cut -f1)"
+          [[ "$current_main" == "$GITHUB_SHA" ]] || {
+            printf 'Release must run from the current protected main SHA.\n' >&2
+            exit 1
+          }
           [[ "$INTENT_PATH" =~ ^intents/[a-z0-9][a-z0-9._-]{7,127}\.json$ ]] || {
             printf 'Intent must be a canonical file directly under intents/.\n' >&2
             exit 1
@@ -258,6 +264,12 @@ jobs:
           SOURCE_TREE: ${{ needs.validate-intent.outputs.source-tree }}
         run: |
           set -Eeuo pipefail
+          current_main="$(git ls-remote --exit-code \
+            "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git" refs/heads/main | cut -f1)"
+          [[ "$current_main" == "$GITHUB_SHA" ]] || {
+            printf 'Protected main changed after release validation; publication is revoked.\n' >&2
+            exit 1
+          }
           output="$RUNNER_TEMP/revalidated-identity"
           python3 control/scripts/release_control.py validate-intent \
             --intent candidate/release-intent.json \
@@ -394,6 +406,12 @@ jobs:
           PUBLISHED_DIGEST: ${{ needs.publish-sign.outputs.digest }}
         run: |
           set -Eeuo pipefail
+          current_main="$(git ls-remote --exit-code \
+            "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git" refs/heads/main | cut -f1)"
+          [[ "$current_main" == "$GITHUB_SHA" ]] || {
+            printf 'Protected main changed after publication; promotion is revoked.\n' >&2
+            exit 1
+          }
           python3 control/scripts/release_control.py validate-intent \
             --intent evidence/release-intent.json \
             --signature evidence/release-intent.json.sig \
