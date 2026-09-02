@@ -165,6 +165,15 @@ class WorkflowPolicyTests(unittest.TestCase):
             validate.index("validate-intent"),
         )
 
+    def test_release_requires_two_intent_signatures_at_every_validation_boundary(self) -> None:
+        text = (WORKFLOWS / "release.yml").read_text(encoding="utf-8")
+        for name in ("validate-intent", "publish-sign", "promote"):
+            block = job_block(text, name)
+            self.assertIn("--signature", block, name)
+            self.assertIn(".sig.1", block, name)
+            self.assertIn(".sig.2", block, name)
+        self.assertNotIn("release-intent.json.sig\n", text)
+
     def test_build_arguments_are_central_policy_outputs(self) -> None:
         text = (WORKFLOWS / "release.yml").read_text(encoding="utf-8")
         self.assertIn("build-args-json:", text)

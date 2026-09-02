@@ -205,6 +205,17 @@ class BootstrapPolicyTests(unittest.TestCase):
             self.assertEqual(set(evidence["required"]), expected, filename)
             self.assertEqual(set(evidence["properties"]), expected, filename)
 
+    def test_release_intent_schema_requires_exactly_two_distinct_signers(self) -> None:
+        schema = json.loads(
+            (ROOT / "contracts/release-intent.schema.json").read_text(encoding="utf-8")
+        )
+        self.assertIn("signer_identities", schema["required"])
+        self.assertNotIn("signer_identity", schema["required"])
+        signers = schema["properties"]["signer_identities"]
+        self.assertEqual(signers["minItems"], 2)
+        self.assertEqual(signers["maxItems"], 2)
+        self.assertTrue(signers["uniqueItems"])
+
     def test_artifact_lock_proposal_schema_pins_canonical_evidence_filenames(self) -> None:
         expected = {
             "lock": "evidence-lock.json",

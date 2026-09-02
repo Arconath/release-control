@@ -103,7 +103,7 @@ class ReleaseControlTests(unittest.TestCase):
                 "reason": "Restore the last verified production image.",
             },
             "schema_version": 1,
-            "signer_identity": "release-operator",
+            "signer_identities": ["release-operator", "second-operator"],
             "source": {
                 "repository": "Arconath/releasepassport",
                 "commit_sha": "2" * 40,
@@ -128,21 +128,26 @@ class ReleaseControlTests(unittest.TestCase):
         self.allowed.write_text(
             f"release-operator {public}\nsecond-operator {second_public}\n", encoding="utf-8"
         )
-        subprocess.run(
-            [
-                "ssh-keygen",
-                "-Y",
-                "sign",
-                "-f",
-                str(self.key),
-                "-n",
-                rc.NAMESPACE,
-                str(self.intent_path),
-            ],
-            check=True,
-            capture_output=True,
-        )
-        self.signature = Path(f"{self.intent_path}.sig")
+        self.signatures = []
+        for index, key in enumerate((self.key, self.second_key), 1):
+            subprocess.run(
+                [
+                    "ssh-keygen",
+                    "-Y",
+                    "sign",
+                    "-f",
+                    str(key),
+                    "-n",
+                    rc.NAMESPACE,
+                    str(self.intent_path),
+                ],
+                check=True,
+                capture_output=True,
+            )
+            generated = Path(f"{self.intent_path}.sig")
+            signature = Path(f"{self.intent_path}.sig.{index}")
+            generated.rename(signature)
+            self.signatures.append(signature)
 
     def tearDown(self) -> None:
         self.temp.cleanup()
@@ -302,7 +307,7 @@ class ReleaseControlTests(unittest.TestCase):
     def validate(self) -> tuple[dict, dict]:
         return rc.validate_intent(
             self.intent_path,
-            self.signature,
+            self.signatures,
             self.allowed,
             self.policy_dir,
             self.now,
@@ -432,7 +437,7 @@ class ReleaseControlTests(unittest.TestCase):
         with self.assertRaisesRegex(rc.ContractError, "expired"):
             rc.validate_intent(
                 self.intent_path,
-                self.signature,
+                self.signatures,
                 self.allowed,
                 self.policy_dir,
                 dt.datetime(2026, 8, 31, 1, 0, tzinfo=dt.timezone.utc),
@@ -443,13 +448,27 @@ class ReleaseControlTests(unittest.TestCase):
         with self.assertRaisesRegex(rc.ContractError, "unknown fields"):
             rc.validate_intent_value(value, self.policy, now=self.now)
 
+    def test_release_intent_requires_two_distinct_signatures(self) -> None:
+        self.signatures[1].unlink()
+        with self.assertRaisesRegex(rc.ContractError, "missing detached signature"):
+            self.validate()
+
+    def test_release_intent_rejects_one_or_duplicate_signer_identity(self) -> None:
+        for identities in (["release-operator"], ["release-operator", "release-operator"]):
+            with self.subTest(identities=identities):
+                value = dict(self.intent, signer_identities=identities)
+                with self.assertRaisesRegex(
+                    rc.ContractError, "exactly two distinct signer identities"
+                ):
+                    rc.validate_intent_value(value, self.policy, now=self.now)
+
     def test_single_operator_key_is_rejected_before_signature_verification(self) -> None:
         single = self.root / "single-operator-signers"
         single.write_text(self.allowed.read_text(encoding="utf-8").splitlines()[0] + "\n", encoding="utf-8")
         with self.assertRaisesRegex(rc.ContractError, "at least two distinct named operator keys"):
             rc.validate_intent(
                 self.intent_path,
-                self.signature,
+                self.signatures,
                 single,
                 self.policy_dir,
                 self.now,
@@ -462,7 +481,7 @@ class ReleaseControlTests(unittest.TestCase):
         with self.assertRaisesRegex(rc.ContractError, "at least two distinct named operator keys"):
             rc.validate_intent(
                 self.intent_path,
-                self.signature,
+                self.signatures,
                 one_key,
                 self.policy_dir,
                 self.now,
@@ -961,6 +980,26 @@ class ReleaseControlTests(unittest.TestCase):
                 RELEASE_CONTROL_SHA,
             )
 
+    def test_license_evidence_binding_requires_exact_declared_value(self) -> None:
+        archive, build_evidence, _ = self.make_final_release()
+        evidence_dir = self.root / "evidence"
+        licenses = evidence_dir / "licenses.json"
+        value = json.loads(licenses.read_text(encoding="utf-8"))
+        value["packages"][0]["licenses"] = ["MIT"]
+        write_json(licenses, value)
+        with self.assertRaisesRegex(rc.ContractError, "licenseDeclared exactly"):
+            rc.create_evidence_lock(
+                self.intent,
+                build_evidence,
+                evidence_dir / "build-evidence.json",
+                archive,
+                evidence_dir / "sbom.spdx.json",
+                licenses,
+                evidence_dir / "provenance.intoto.json",
+                evidence_dir / "vulnerabilities.json",
+                RELEASE_CONTROL_SHA,
+            )
+
     def test_malformed_license_values_fail_as_contract_errors(self) -> None:
         path = self.root / "licenses.json"
         write_json(
@@ -972,7 +1011,7 @@ class ReleaseControlTests(unittest.TestCase):
                 "spdx_version": "SPDX-2.3",
             },
         )
-        with self.assertRaisesRegex(rc.ContractError, "license strings"):
+        with self.assertRaisesRegex(rc.ContractError, "exactly one asserted license string"):
             rc.validate_json_evidence(path, "licenses")
 
     def test_release_record_requires_signature_and_attestation_evidence(self) -> None:

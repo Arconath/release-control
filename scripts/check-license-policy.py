@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fail closed when an SPDX SBOM does not provide usable license evidence."""
+"""Fail closed when an SPDX SBOM does not provide exact declared licenses."""
 
 from __future__ import annotations
 
@@ -27,26 +27,18 @@ def load(path: Path) -> dict[str, Any]:
     return value
 
 
-def license_values(package: dict[str, Any], context: str) -> list[str]:
-    values: list[str] = []
-    for field in ("licenseConcluded", "licenseDeclared"):
-        value = package.get(field)
-        if value is not None:
-            if not isinstance(value, str):
-                fail(f"{context}.{field} must be a string")
-            values.append(value)
-    from_files = package.get("licenseInfoFromFiles", [])
-    if not isinstance(from_files, list) or any(not isinstance(value, str) for value in from_files):
-        fail(f"{context}.licenseInfoFromFiles must be an array of strings")
-    values.extend(from_files)
-    usable = sorted(
-        {
-            value.strip()
-            for value in values
-            if value.strip() and value.strip() not in {"NOASSERTION", "NONE"}
-        }
-    )
-    return usable
+UNASSERTED_LICENSES = {"NOASSERTION", "NONE"}
+
+
+def declared_license(package: dict[str, Any], context: str) -> str:
+    value = package.get("licenseDeclared")
+    if not isinstance(value, str):
+        fail(f"{context}.licenseDeclared must be a string")
+    if not value or value.strip() != value or value in UNASSERTED_LICENSES:
+        fail(f"{context}.licenseDeclared must be an asserted SPDX value")
+    if "\n" in value or "\r" in value:
+        fail(f"{context}.licenseDeclared must be a single-line string")
+    return value
 
 
 def build_report(sbom: dict[str, Any]) -> dict[str, Any]:
@@ -59,7 +51,6 @@ def build_report(sbom: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(packages, list) or not packages:
         fail("SBOM must contain at least one package")
     report_packages: list[dict[str, Any]] = []
-    missing: list[str] = []
     for index, package in enumerate(packages):
         context = f"packages[{index}]"
         if not isinstance(package, dict):
@@ -67,12 +58,9 @@ def build_report(sbom: dict[str, Any]) -> dict[str, Any]:
         name = package.get("name")
         if not isinstance(name, str) or not name.strip() or "\n" in name or "\r" in name:
             fail(f"{context}.name must be a non-empty single-line string")
-        licenses = license_values(package, context)
-        report_packages.append({"name": name, "licenses": licenses})
-        if not licenses:
-            missing.append(name)
-    if missing:
-        fail("packages without an asserted license: " + ", ".join(sorted(set(missing))))
+        # Preserve the SBOM's declared-license value exactly. Other SPDX
+        # fields describe different facts and must not be merged into it.
+        report_packages.append({"name": name, "licenses": [declared_license(package, context)]})
     return {
         "schema_version": 1,
         "spdx_version": spdx_version,

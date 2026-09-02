@@ -47,7 +47,7 @@ jobs:
           ref: ${{ github.sha }}
           persist-credentials: false
 
-      - name: Validate canonical path and detached signature
+      - name: Validate canonical path and two detached signatures
         id: contract
         shell: bash
         env:
@@ -82,7 +82,8 @@ jobs:
             --settings bootstrap/repository-settings.json
           python3 scripts/release_control.py validate-intent \
             --intent "$INTENT_PATH" \
-            --signature "$INTENT_PATH.sig" \
+            --signature "$INTENT_PATH.sig.1" \
+            --signature "$INTENT_PATH.sig.2" \
             --allowed-signers policies/release-signers \
             --policy-dir policies/products \
             --github-output "$GITHUB_OUTPUT"
@@ -586,7 +587,8 @@ jobs:
         run: |
           set -Eeuo pipefail
           cp "control/$INTENT_PATH" candidate/release-intent.json
-          cp "control/$INTENT_PATH.sig" candidate/release-intent.json.sig
+          cp "control/$INTENT_PATH.sig.1" candidate/release-intent.json.sig.1
+          cp "control/$INTENT_PATH.sig.2" candidate/release-intent.json.sig.2
           python3 control/scripts/release_control.py build-evidence \
             --intent candidate/release-intent.json \
             --archive candidate/candidate.oci.tar \
@@ -653,7 +655,8 @@ jobs:
             candidate/candidate.oci.tar.age.sha256
             candidate/candidate-handoff.json
             candidate/release-intent.json
-            candidate/release-intent.json.sig
+            candidate/release-intent.json.sig.1
+            candidate/release-intent.json.sig.2
             candidate/build-evidence.json
             candidate/evidence-lock.json
             candidate/sbom.spdx.json
@@ -784,7 +787,8 @@ jobs:
           output="$RUNNER_TEMP/revalidated-identity"
           python3 control/scripts/release_control.py validate-intent \
             --intent candidate/release-intent.json \
-            --signature candidate/release-intent.json.sig \
+            --signature candidate/release-intent.json.sig.1 \
+            --signature candidate/release-intent.json.sig.2 \
             --allowed-signers control/policies/release-signers \
             --policy-dir control/policies/products \
             --github-output "$output"
@@ -1056,7 +1060,8 @@ jobs:
           name: published-evidence-${{ needs.validate-intent.outputs.intent-id }}
           path: |
             candidate/release-intent.json
-            candidate/release-intent.json.sig
+            candidate/release-intent.json.sig.1
+            candidate/release-intent.json.sig.2
             candidate/build-evidence.json
             candidate/evidence-lock.json
             candidate/release-record.json
@@ -1135,7 +1140,8 @@ jobs:
           }
           python3 control/scripts/release_control.py validate-intent \
             --intent evidence/release-intent.json \
-            --signature evidence/release-intent.json.sig \
+            --signature evidence/release-intent.json.sig.1 \
+            --signature evidence/release-intent.json.sig.2 \
             --allowed-signers control/policies/release-signers \
             --policy-dir control/policies/products
           python3 control/scripts/release_control.py emit-manifests \
@@ -1219,7 +1225,8 @@ jobs:
           fi
           release_files=(
             evidence/release-intent.json
-            evidence/release-intent.json.sig
+            evidence/release-intent.json.sig.1
+            evidence/release-intent.json.sig.2
             evidence/build-evidence.json
             evidence/evidence-lock.json
             evidence/release-record.json
@@ -1258,7 +1265,8 @@ jobs:
           name: promotion-evidence-${{ needs.validate-intent.outputs.intent-id }}
           path: |
             evidence/release-intent.json
-            evidence/release-intent.json.sig
+            evidence/release-intent.json.sig.1
+            evidence/release-intent.json.sig.2
             evidence/build-evidence.json
             evidence/evidence-lock.json
             evidence/release-record.json

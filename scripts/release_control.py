@@ -17,6 +17,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+from collections.abc import Sequence
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -1094,7 +1095,7 @@ def validate_intent_value(
             "schema_version",
             "intent_id",
             "policy_id",
-            "signer_identity",
+            "signer_identities",
             "issued_at",
             "expires_at",
             "source",
@@ -1107,7 +1108,14 @@ def validate_intent_value(
         die("unsupported intent schema_version")
     require_string(value["intent_id"], INTENT_ID, "intent_id")
     require_string(value["policy_id"], POLICY_ID, "policy_id")
-    require_string(value["signer_identity"], IDENT, "signer_identity")
+    signer_identities = value["signer_identities"]
+    if (
+        not isinstance(signer_identities, list)
+        or len(signer_identities) != 2
+        or any(not isinstance(identity, str) or not IDENT.fullmatch(identity) for identity in signer_identities)
+        or len(set(signer_identities)) != 2
+    ):
+        die("intent must name exactly two distinct signer identities")
     if value["policy_id"] != policy["policy_id"]:
         die("intent policy_id does not match policy")
     issued = parse_time(value["issued_at"], "issued_at")
@@ -1151,34 +1159,46 @@ def validate_intent_value(
     return value
 
 
-def verify_ssh_signature(intent: Path, signature: Path, allowed: Path, identity: str) -> None:
+def verify_ssh_signatures(
+    intent: Path,
+    signatures: Sequence[Path],
+    allowed: Path,
+    identities: Sequence[str],
+) -> None:
     if intent.is_symlink() or not intent.is_file():
         die(f"release intent must be a regular non-symlink file: {intent}")
-    if signature.is_symlink() or not signature.is_file():
-        die(f"missing detached signature: {signature}")
+    if len(signatures) != 2 or len(identities) != 2 or len(set(identities)) != 2:
+        die("release intent requires exactly two distinct detached signatures")
+    expected_names = [f"{intent.name}.sig.1", f"{intent.name}.sig.2"]
+    for index, signature in enumerate(signatures):
+        if signature.name != expected_names[index]:
+            die(f"detached signature {index + 1} must be named {expected_names[index]}")
+        if signature.is_symlink() or not signature.is_file():
+            die(f"missing detached signature: {signature}")
     if allowed.is_symlink() or not allowed.is_file():
         die(f"missing allowed signers file: {allowed}")
     require_two_operator_keys(allowed)
-    command = [
-        "ssh-keygen",
-        "-Y",
-        "verify",
-        "-f",
-        str(allowed),
-        "-I",
-        identity,
-        "-n",
-        NAMESPACE,
-        "-s",
-        str(signature),
-    ]
-    try:
-        result = subprocess.run(command, input=intent.read_bytes(), capture_output=True, check=False)
-    except FileNotFoundError:
-        die("ssh-keygen is required to verify release intent signatures")
-    if result.returncode:
-        detail = result.stderr.decode(errors="replace").strip()
-        die(f"release intent signature verification failed: {detail}")
+    for identity, signature in zip(identities, signatures):
+        command = [
+            "ssh-keygen",
+            "-Y",
+            "verify",
+            "-f",
+            str(allowed),
+            "-I",
+            identity,
+            "-n",
+            NAMESPACE,
+            "-s",
+            str(signature),
+        ]
+        try:
+            result = subprocess.run(command, input=intent.read_bytes(), capture_output=True, check=False)
+        except FileNotFoundError:
+            die("ssh-keygen is required to verify release intent signatures")
+        if result.returncode:
+            detail = result.stderr.decode(errors="replace").strip()
+            die(f"release intent signature verification failed for {identity}: {detail}")
 
 
 def operator_key_inventory(allowed: Path) -> tuple[set[str], set[tuple[str, str]]]:
@@ -1470,7 +1490,7 @@ def validate_governance(
 
 def validate_intent(
     intent_path: Path,
-    signature: Path,
+    signatures: Sequence[Path],
     allowed: Path,
     policy_dir: Path,
     now: dt.datetime,
@@ -1482,7 +1502,7 @@ def validate_intent(
         die("intent missing policy_id")
     policy = load_policy(policy_dir, policy_id)
     validate_intent_value(intent, policy, now=now)
-    verify_ssh_signature(intent_path, signature, allowed, intent["signer_identity"])
+    verify_ssh_signatures(intent_path, signatures, allowed, intent["signer_identities"])
     return intent, policy
 
 
@@ -1895,18 +1915,16 @@ def validate_json_evidence(path: Path, key: str) -> dict[str, Any]:
             ):
                 die(f"{context}.name must be a non-empty single-line string")
             licenses = package["licenses"]
-            if not isinstance(licenses, list) or not licenses:
-                die(f"{context}.licenses must contain asserted license strings")
-            if any(
-                not isinstance(license_name, str)
-                or not license_name.strip()
-                or "\r" in license_name
-                or "\n" in license_name
-                for license_name in licenses
+            if (
+                not isinstance(licenses, list)
+                or len(licenses) != 1
+                or not isinstance(licenses[0], str)
+                or not licenses[0].strip()
+                or licenses[0].strip() != licenses[0]
+                or "\r" in licenses[0]
+                or "\n" in licenses[0]
             ):
-                die(f"{context}.licenses must contain unique asserted license strings")
-            if len(licenses) != len(set(licenses)):
-                die(f"{context}.licenses must contain unique asserted license strings")
+                die(f"{context}.licenses must contain exactly one asserted license string")
     elif key == "vulnerabilities":
         if not isinstance(value.get("matches"), list) or not isinstance(value.get("descriptor"), dict):
             die("vulnerability evidence is not a complete Grype report")
@@ -1916,24 +1934,38 @@ def validate_json_evidence(path: Path, key: str) -> dict[str, Any]:
 def validate_license_evidence_binding(
     sbom: dict[str, Any], licenses: dict[str, Any]
 ) -> None:
-    """Require the derived license report to describe the exact SPDX packages."""
+    """Require license evidence to preserve each SBOM licenseDeclared value exactly."""
 
     sbom_packages = sbom.get("packages")
     if not isinstance(sbom_packages, list) or not sbom_packages:
         die("SBOM evidence must contain packages before license binding")
-    sbom_names: list[str] = []
-    for index, package in enumerate(sbom_packages):
-        if not isinstance(package, dict):
-            die(f"SBOM package {index} must be an object before license binding")
-        name = package.get("name")
-        if not isinstance(name, str) or not name.strip() or "\r" in name or "\n" in name:
-            die(f"SBOM package {index} must have a canonical name before license binding")
-        sbom_names.append(name)
-    license_names = [package["name"] for package in licenses["packages"]]
     if licenses["spdx_version"] != sbom["spdxVersion"]:
         die("license evidence SPDX version does not match SBOM")
-    if licenses["package_count"] != len(sbom_names) or license_names != sbom_names:
+    if licenses["package_count"] != len(sbom_packages):
         die("license evidence package list does not match SBOM")
+    for index, (sbom_package, license_package) in enumerate(
+        zip(sbom_packages, licenses["packages"])
+    ):
+        context = f"SBOM package {index}"
+        if not isinstance(sbom_package, dict):
+            die(f"{context} must be an object before license binding")
+        name = sbom_package.get("name")
+        if not isinstance(name, str) or not name.strip() or "\r" in name or "\n" in name:
+            die(f"{context} must have a canonical name before license binding")
+        declared = sbom_package.get("licenseDeclared")
+        if (
+            not isinstance(declared, str)
+            or not declared
+            or declared.strip() != declared
+            or declared in {"NONE", "NOASSERTION"}
+            or "\r" in declared
+            or "\n" in declared
+        ):
+            die(f"{context}.licenseDeclared must be an asserted SPDX value")
+        if license_package["name"] != name:
+            die("license evidence package list does not match SBOM")
+        if license_package["licenses"] != [declared]:
+            die(f"license evidence for {name} does not match SBOM licenseDeclared exactly")
 
 
 def create_evidence_lock(
@@ -2676,7 +2708,9 @@ def main() -> int:
 
     intent_parser = sub.add_parser("validate-intent")
     intent_parser.add_argument("--intent", type=Path, required=True)
-    intent_parser.add_argument("--signature", type=Path, required=True)
+    intent_parser.add_argument(
+        "--signature", dest="signatures", type=Path, action="append", required=True
+    )
     intent_parser.add_argument("--allowed-signers", type=Path, required=True)
     intent_parser.add_argument("--policy-dir", type=Path, required=True)
     intent_parser.add_argument("--now")
@@ -2803,7 +2837,7 @@ def main() -> int:
         elif args.command == "validate-intent":
             intent, policy = validate_intent(
                 args.intent,
-                args.signature,
+                args.signatures,
                 args.allowed_signers,
                 args.policy_dir,
                 utc_now(args.now),
