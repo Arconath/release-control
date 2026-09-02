@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://release-control.arconath.com/contracts/license-evidence.schema.json",
+  "title": "Arconath SPDX license evidence",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "spdx_version", "package_count", "packages"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "spdx_version": {"type": "string", "pattern": "^SPDX-[0-9]+\\.[0-9]+$"},
+    "package_count": {"type": "integer", "minimum": 1},
+    "packages": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "licenses"],
+        "properties": {
+          "name": {"type": "string", "minLength": 1, "pattern": "^[^\\r\\n]*[^\\s\\r\\n][^\\r\\n]*$"},
+          "licenses": {
+            "type": "array",
+            "minItems": 1,
+            "uniqueItems": true,
+            "items": {"type": "string", "minLength": 1, "pattern": "^[^\\r\\n]*[^\\s\\r\\n][^\\r\\n]*$"}
+          }
+        }
+      }
+    }
+  }
+}

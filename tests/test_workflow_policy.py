@@ -296,6 +296,9 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertIn("build-provenance", build)
         self.assertIn("create-evidence-lock", build)
         self.assertIn("--release-control-sha \"$GITHUB_SHA\"", build)
+        self.assertIn("check-license-policy.py", build)
+        self.assertIn("candidate/licenses.json", build)
+        self.assertIn("--licenses candidate/licenses.json", build)
         self.assertIn("evidence-lock.json", build)
         self.assertIn("verify-evidence-lock", publish)
         self.assertIn("Verify exact evidence lock before registry mutation", publish)
@@ -329,6 +332,7 @@ class WorkflowPolicyTests(unittest.TestCase):
         for name in (
             "artifact.sigstore.json",
             "build-evidence.attestation.sigstore.json",
+            "license.attestation.sigstore.json",
             "sbom.attestation.sigstore.json",
             "provenance.attestation.sigstore.json",
             "vulnerability.attestation.sigstore.json",
@@ -339,12 +343,13 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertIn("verify-attestation-payload", publish)
         for predicate_type in (
             "https://arconath.com/BuildEvidence/v1",
+            "https://arconath.com/LicenseEvidence/v1",
             "https://spdx.dev/Document",
             "https://slsa.dev/provenance/v1",
             "https://arconath.com/VulnerabilityScan/v1",
         ):
             self.assertIn(predicate_type, publish)
-        self.assertEqual(publish.count(".verified-attestation.json"), 4)
+        self.assertEqual(publish.count(".verified-attestation.json"), 5)
         self.assertIn("finalize-release", publish)
         self.assertLess(
             publish.index("Install Cosign before any registry mutation"),
@@ -358,6 +363,8 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertIn("evidence/promotion-manifest.json", promote)
         self.assertIn("evidence/rollback-manifest.json", promote)
         self.assertIn("evidence/artifact-lock-proposal.json", promote)
+        self.assertIn("evidence/licenses.json", promote)
+        self.assertIn("evidence/license.attestation.sigstore.json", promote)
         self.assertIn("evidence/artifact-lock-proposal.sigstore.json", promote)
         self.assertIn("cosign verify-blob --bundle", promote)
         self.assertIn("certificate-oidc-issuer https://token.actions.githubusercontent.com", promote)

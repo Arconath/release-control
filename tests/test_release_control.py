@@ -194,7 +194,29 @@ class ReleaseControlTests(unittest.TestCase):
         evidence_dir = self.root / "evidence"
         evidence_dir.mkdir()
         sbom = evidence_dir / "sbom.spdx.json"
-        write_json(sbom, {"packages": [], "spdxVersion": "SPDX-2.3"})
+        write_json(
+            sbom,
+            {
+                "packages": [
+                    {
+                        "licenseConcluded": "Apache-2.0",
+                        "licenseDeclared": "Apache-2.0",
+                        "name": "example",
+                    }
+                ],
+                "spdxVersion": "SPDX-2.3",
+            },
+        )
+        licenses = evidence_dir / "licenses.json"
+        write_json(
+            licenses,
+            {
+                "package_count": 1,
+                "packages": [{"licenses": ["Apache-2.0"], "name": "example"}],
+                "schema_version": 1,
+                "spdx_version": "SPDX-2.3",
+            },
+        )
         vulnerabilities = evidence_dir / "vulnerabilities.json"
         write_json(vulnerabilities, {"descriptor": {}, "matches": []})
         provenance = evidence_dir / "provenance.intoto.json"
@@ -211,6 +233,7 @@ class ReleaseControlTests(unittest.TestCase):
                 build_path,
                 archive,
                 sbom,
+                licenses,
                 provenance,
                 vulnerabilities,
                 RELEASE_CONTROL_SHA,
@@ -226,6 +249,7 @@ class ReleaseControlTests(unittest.TestCase):
         for filename in (
             "artifact.sigstore.json",
             "build-evidence.attestation.sigstore.json",
+            "license.attestation.sigstore.json",
             "sbom.attestation.sigstore.json",
             "provenance.attestation.sigstore.json",
             "vulnerability.attestation.sigstore.json",
@@ -470,7 +494,11 @@ class ReleaseControlTests(unittest.TestCase):
         self.assertEqual(readiness["protected_codeowner_rules_ready"], len(patterns))
         self.assertEqual(readiness["release_signer_identities"], 2)
         self.assertEqual(readiness["release_signer_keys"], 2)
+        self.assertEqual(readiness["missing_codeowner_rules"], [])
+        self.assertEqual(readiness["blocking_reasons"], [])
         self.assertTrue(readiness["checked_in_contract_ready"])
+        self.assertEqual(readiness["status"], "ready")
+        self.assertTrue(readiness["merge_ready"])
         self.assertEqual(readiness["live_github_configuration"], "unverified")
 
     def test_incomplete_governance_diagnostic_cannot_claim_live_readiness(self) -> None:
@@ -481,10 +509,72 @@ class ReleaseControlTests(unittest.TestCase):
             require_ready=False,
         )
         self.assertFalse(readiness["checked_in_contract_ready"])
+        self.assertEqual(readiness["status"], "blocked")
+        self.assertFalse(readiness["merge_ready"])
+        self.assertIn("CODEOWNERS_INCOMPLETE", readiness["blocking_reasons"])
+        self.assertIn("CODEOWNER_RULES_UNDERPROTECTED", readiness["blocking_reasons"])
+        self.assertIn("RELEASE_SIGNER_KEYS_INCOMPLETE", readiness["blocking_reasons"])
         self.assertEqual(readiness["live_github_configuration"], "unverified")
         self.assertEqual(readiness["minimum_named_codeowners"], 2)
         self.assertEqual(readiness["minimum_release_signer_keys"], 2)
         self.assertEqual(readiness["minimum_environment_reviewers"], 2)
+
+    def test_merge_readiness_reports_each_local_gate_and_external_hold(self) -> None:
+        readiness = rc.merge_readiness(
+            ROOT / ".github/CODEOWNERS",
+            ROOT / "policies/release-signers",
+            ROOT / "bootstrap/repository-settings.json",
+            ROOT / "policies/products",
+            ROOT / "contracts",
+            ROOT / ".github/workflows",
+        )
+        self.assertEqual(readiness["status"], "blocked")
+        self.assertFalse(readiness["merge_ready"])
+        self.assertFalse(readiness["checked_in_contract_ready"])
+        self.assertEqual(readiness["live_github_configuration"], "unverified")
+        self.assertEqual(
+            [check["name"] for check in readiness["checks"]],
+            ["governance", "contracts", "policies", "workflows"],
+        )
+        self.assertIn("GITHUB_CONFIGURATION_UNVERIFIED", readiness["external_blockers"])
+        self.assertIn("RELEASE_SIGNER_KEYS_INCOMPLETE", readiness["blocking_reasons"])
+
+    def test_contract_and_workflow_inventories_are_closed_world(self) -> None:
+        contracts = rc.validate_contract_inventory(ROOT / "contracts")
+        workflows = rc.validate_workflow_policy(ROOT / ".github/workflows")
+        self.assertEqual(contracts, {"schema_files": 11})
+        self.assertEqual(workflows["workflow_files"], 2)
+        self.assertEqual(workflows["runner_blocks"], 7)
+        self.assertEqual(workflows["permission_blocks"], 8)
+        self.assertGreater(workflows["external_actions"], 0)
+
+    def test_merge_readiness_cli_has_explicit_fail_closed_mode(self) -> None:
+        command = [
+            "python3",
+            str(MODULE_PATH),
+            "merge-readiness",
+            "--codeowners",
+            str(ROOT / ".github/CODEOWNERS"),
+            "--allowed-signers",
+            str(ROOT / "policies/release-signers"),
+            "--settings",
+            str(ROOT / "bootstrap/repository-settings.json"),
+            "--policy-dir",
+            str(ROOT / "policies/products"),
+            "--contract-dir",
+            str(ROOT / "contracts"),
+            "--workflow-dir",
+            str(ROOT / ".github/workflows"),
+        ]
+        diagnostic = subprocess.run(command, capture_output=True, text=True, check=False)
+        self.assertEqual(diagnostic.returncode, 0, diagnostic.stderr)
+        value = json.loads(diagnostic.stdout)
+        self.assertEqual(value["status"], "blocked")
+        strict = subprocess.run(
+            [*command, "--require-ready"], capture_output=True, text=True, check=False
+        )
+        self.assertNotEqual(strict.returncode, 0)
+        self.assertIn("merge-readiness is blocked", strict.stderr)
 
     def test_release_governance_requires_source_handoff_reviewers(self) -> None:
         codeowners = self.root / "CODEOWNERS"
@@ -784,7 +874,7 @@ class ReleaseControlTests(unittest.TestCase):
             "registry.arconath.internal/arconath/releasepassport/api@" + OCI_DIGEST,
         )
 
-    def test_evidence_lock_binds_sbom_provenance_and_vulnerability_report(self) -> None:
+    def test_evidence_lock_binds_sbom_license_provenance_and_vulnerability_report(self) -> None:
         _, _, record = self.make_final_release()
         sbom = self.root / "evidence/sbom.spdx.json"
         sbom.write_text('{"packages":[],"spdxVersion":"SPDX-2.3","tampered":true}\n', encoding="utf-8")
@@ -795,6 +885,46 @@ class ReleaseControlTests(unittest.TestCase):
                 self.root / "evidence",
                 RELEASE_CONTROL_SHA,
             )
+
+    def test_license_evidence_is_bound_to_the_exact_sbom_package_list(self) -> None:
+        archive, build_evidence, _ = self.make_final_release()
+        evidence_dir = self.root / "evidence"
+        licenses = evidence_dir / "licenses.json"
+        write_json(
+            licenses,
+            {
+                "package_count": 1,
+                "packages": [{"licenses": ["Apache-2.0"], "name": "different"}],
+                "schema_version": 1,
+                "spdx_version": "SPDX-2.3",
+            },
+        )
+        with self.assertRaisesRegex(rc.ContractError, "package list does not match SBOM"):
+            rc.create_evidence_lock(
+                self.intent,
+                build_evidence,
+                evidence_dir / "build-evidence.json",
+                archive,
+                evidence_dir / "sbom.spdx.json",
+                licenses,
+                evidence_dir / "provenance.intoto.json",
+                evidence_dir / "vulnerabilities.json",
+                RELEASE_CONTROL_SHA,
+            )
+
+    def test_malformed_license_values_fail_as_contract_errors(self) -> None:
+        path = self.root / "licenses.json"
+        write_json(
+            path,
+            {
+                "package_count": 1,
+                "packages": [{"licenses": [{"not": "a string"}], "name": "example"}],
+                "schema_version": 1,
+                "spdx_version": "SPDX-2.3",
+            },
+        )
+        with self.assertRaisesRegex(rc.ContractError, "license strings"):
+            rc.validate_json_evidence(path, "licenses")
 
     def test_release_record_requires_signature_and_attestation_evidence(self) -> None:
         archive = self.make_oci()

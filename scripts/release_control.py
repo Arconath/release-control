@@ -282,10 +282,12 @@ EVIDENCE_FILE_NAMES = {
     "build_evidence": "build-evidence.json",
     "lock": "evidence-lock.json",
     "sbom": "sbom.spdx.json",
+    "licenses": "licenses.json",
     "provenance": "provenance.intoto.json",
     "vulnerabilities": "vulnerabilities.json",
     "artifact_signature": "artifact.sigstore.json",
     "build_evidence_attestation": "build-evidence.attestation.sigstore.json",
+    "license_attestation": "license.attestation.sigstore.json",
     "sbom_attestation": "sbom.attestation.sigstore.json",
     "provenance_attestation": "provenance.attestation.sigstore.json",
     "vulnerability_attestation": "vulnerability.attestation.sigstore.json",
@@ -293,14 +295,40 @@ EVIDENCE_FILE_NAMES = {
 RELEASE_EVIDENCE_KEYS = (
     "lock",
     "sbom",
+    "licenses",
     "provenance",
     "vulnerabilities",
     "artifact_signature",
     "build_evidence_attestation",
+    "license_attestation",
     "sbom_attestation",
     "provenance_attestation",
     "vulnerability_attestation",
 )
+EXPECTED_CONTRACT_FILES = frozenset(
+    {
+        "artifact-lock-proposal.schema.json",
+        "build-evidence.schema.json",
+        "evidence-lock.schema.json",
+        "license-evidence.schema.json",
+        "product-policy.schema.json",
+        "promotion-manifest.schema.json",
+        "provenance.schema.json",
+        "release-intent.schema.json",
+        "release-record.schema.json",
+        "rollback-manifest.schema.json",
+        "source-handoff.schema.json",
+    }
+)
+CANONICAL_RUNNER_GROUP = "arconath-jit"
+CANONICAL_RUNNER_LABELS = (
+    "self-hosted",
+    "linux",
+    "x64",
+    "arconath-jit",
+    "rootless-buildkit",
+)
+CONTRACT_SCHEMA_ID_PREFIX = "https://release-control.arconath.com/contracts/"
 
 
 class ContractError(ValueError):
@@ -741,7 +769,7 @@ def validate_policy(value: dict[str, Any], *, require_enabled: bool = True) -> d
     return value
 
 
-def validate_policy_set(policy_dir: Path) -> None:
+def validate_policy_set(policy_dir: Path) -> dict[str, int]:
     """Require one closed-world OCI policy inventory for all 11 products."""
 
     require_directory(policy_dir, "policy directory")
@@ -752,9 +780,11 @@ def validate_policy_set(policy_dir: Path) -> None:
     }
     actual: set[str] = set()
     artifact_repositories: set[str] = set()
+    validated_files = 0
     for path in sorted(policy_dir.iterdir()):
         if not path.name.endswith((".json", ".json.disabled")):
             continue
+        validated_files += 1
         value = load_json(path)
         require_canonical(path, value)
         validate_policy(value, require_enabled=False)
@@ -778,6 +808,231 @@ def validate_policy_set(policy_dir: Path) -> None:
         die(f"canonical product policies missing: {', '.join(missing)}")
     if unexpected:
         die(f"unexpected canonical product policies: {', '.join(unexpected)}")
+    return {
+        "validated_policy_files": validated_files,
+        "canonical_product_policies": len(actual),
+    }
+
+
+def _validate_schema_structure(value: Any, location: str) -> None:
+    """Check the strict structural subset shared by every local JSON schema."""
+
+    if isinstance(value, dict):
+        if "properties" in value and value.get("type") != "object":
+            die(f"{location}: schema properties must have object type")
+        if "required" in value:
+            required = value.get("required")
+            properties = value.get("properties")
+            if value.get("type") != "object" or not isinstance(required, list) or not required:
+                die(f"{location}: schema required must be a non-empty object property list")
+            if not isinstance(properties, dict):
+                die(f"{location}: schema required needs local properties")
+            if any(not isinstance(item, str) or not item for item in required):
+                die(f"{location}: schema required contains an invalid property name")
+            if len(required) != len(set(required)):
+                die(f"{location}: schema required contains duplicate property names")
+            if not set(required).issubset(properties):
+                die(f"{location}: schema required keys must be declared locally")
+        for key, child in value.items():
+            _validate_schema_structure(child, f"{location}/{key}")
+    elif isinstance(value, list):
+        for index, child in enumerate(value):
+            _validate_schema_structure(child, f"{location}/{index}")
+
+
+def validate_contract_inventory(contract_dir: Path) -> dict[str, int]:
+    """Validate the exact, closed-world inventory of release contract schemas."""
+
+    require_directory(contract_dir, "contract schema directory")
+    entries = list(contract_dir.iterdir())
+    actual = {entry.name for entry in entries}
+    missing = sorted(EXPECTED_CONTRACT_FILES - actual)
+    unexpected = sorted(actual - EXPECTED_CONTRACT_FILES)
+    if missing:
+        die(f"contract schemas missing: {', '.join(missing)}")
+    if unexpected:
+        die(f"unexpected contract schema files: {', '.join(unexpected)}")
+    for filename in sorted(EXPECTED_CONTRACT_FILES):
+        path = contract_dir / filename
+        value = load_json(path)
+        if value.get("type") != "object":
+            die(f"{filename}: root schema must have object type")
+        if value.get("additionalProperties") is not False:
+            die(f"{filename}: root schema must close additional properties")
+        required = value.get("required")
+        if not isinstance(required, list) or not required:
+            die(f"{filename}: root schema must declare required properties")
+        schema_id = value.get("$id")
+        if not isinstance(schema_id, str) or not schema_id.startswith(CONTRACT_SCHEMA_ID_PREFIX):
+            die(f"{filename}: schema $id is not in the canonical namespace")
+        _validate_schema_structure(value, filename)
+    return {"schema_files": len(EXPECTED_CONTRACT_FILES)}
+
+
+def _workflow_runner_body(lines: list[str], line_index: int, indent: int, inline: str) -> str:
+    if inline.strip():
+        return inline.strip()
+    body: list[str] = []
+    for line in lines[line_index + 1 :]:
+        if line.strip():
+            line_indent = len(line) - len(line.lstrip(" "))
+            if line_indent <= indent:
+                break
+        body.append(line.strip())
+    return " ".join(body)
+
+
+def validate_workflow_policy(workflow_dir: Path) -> dict[str, int]:
+    """Validate pinned actions, explicit permissions, and the private runner fleet."""
+
+    require_directory(workflow_dir, "workflow directory")
+    paths = sorted(
+        path
+        for path in workflow_dir.iterdir()
+        if path.name.endswith((".yml", ".yaml"))
+    )
+    if not paths:
+        die("workflow directory contains no YAML workflows")
+
+    external_actions = 0
+    runner_blocks = 0
+    permission_blocks = 0
+    for path in paths:
+        if path.is_symlink() or not path.is_file():
+            die(f"workflow must be a regular non-symlink file: {path}")
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()
+        except (OSError, UnicodeError) as exc:
+            die(f"cannot read workflow {path}: {exc}")
+        if not any(re.fullmatch(r"permissions:\s*(?:#.*)?", line) for line in lines):
+            die(f"workflow is missing top-level permissions: {path.name}")
+        for line_number, line in enumerate(lines, 1):
+            permissions_match = re.match(r"^ *permissions:\s*(.*?)(?:\s+#.*)?$", line)
+            if permissions_match:
+                permission_blocks += 1
+                if permissions_match.group(1).strip() in {"read-all", "write-all"}:
+                    die(f"workflow uses broad permissions at {path}:{line_number}")
+            if re.search(r"\b(?:ubuntu|macos|windows)-(?:latest|[0-9][A-Za-z0-9._-]*)\b", line):
+                die(f"workflow contains a GitHub-hosted runner at {path}:{line_number}")
+            uses_match = re.match(r"\s*uses:\s*([^\s#]+)", line)
+            if uses_match:
+                reference = uses_match.group(1)
+                if reference.startswith("./"):
+                    continue
+                if not re.fullmatch(r"[^@]+@[0-9a-f]{40}", reference):
+                    die(f"workflow action is not pinned to a commit at {path}:{line_number}")
+                external_actions += 1
+            runs_on_match = re.match(
+                r"^(?P<indent> *)runs-on:\s*(?P<inline>.*?)(?:\s+#.*)?$", line
+            )
+            if not runs_on_match:
+                continue
+            runner_blocks += 1
+            indent = len(runs_on_match.group("indent"))
+            body = _workflow_runner_body(
+                lines,
+                line_number - 1,
+                indent,
+                runs_on_match.group("inline"),
+            )
+            if not re.search(
+                rf"(?:^|\s)group:\s*{re.escape(CANONICAL_RUNNER_GROUP)}(?:\s|$)",
+                body,
+            ):
+                die(f"workflow runner group is not canonical at {path}:{line_number}")
+            labels_match = re.search(r"labels:\s*\[([^\]]+)\]", body)
+            if not labels_match:
+                die(f"workflow runner labels are not explicit at {path}:{line_number}")
+            labels = [item.strip().strip("'\"") for item in labels_match.group(1).split(",")]
+            if len(labels) != len(set(labels)) or set(labels) != set(CANONICAL_RUNNER_LABELS):
+                die(f"workflow runner labels are not canonical at {path}:{line_number}")
+    if runner_blocks == 0:
+        die("workflow inventory contains no runner declarations")
+    return {
+        "workflow_files": len(paths),
+        "runner_blocks": runner_blocks,
+        "external_actions": external_actions,
+        "permission_blocks": permission_blocks,
+    }
+
+
+def merge_readiness(
+    codeowners: Path,
+    allowed_signers: Path,
+    settings_path: Path,
+    policy_dir: Path,
+    contract_dir: Path,
+    workflow_dir: Path,
+) -> dict[str, Any]:
+    """Report local merge gates without pretending to inspect live GitHub."""
+
+    checks: list[dict[str, Any]] = []
+    blockers: list[str] = []
+
+    try:
+        governance = validate_governance(
+            codeowners,
+            allowed_signers,
+            settings_path,
+            require_ready=False,
+        )
+    except ContractError as exc:
+        checks.append(
+            {
+                "name": "governance",
+                "status": "blocked",
+                "error": str(exc),
+            }
+        )
+        blockers.append("GOVERNANCE_CONTRACT_INVALID")
+    else:
+        governance_blockers = list(governance["blocking_reasons"])
+        checks.append(
+            {
+                "name": "governance",
+                "status": "pass" if not governance_blockers else "blocked",
+                "details": governance,
+            }
+        )
+        blockers.extend(governance_blockers)
+
+    gates: tuple[tuple[str, str, Any], ...] = (
+        (
+            "contracts",
+            "CONTRACT_SCHEMA_INVENTORY_INVALID",
+            lambda: validate_contract_inventory(contract_dir),
+        ),
+        (
+            "policies",
+            "POLICY_SET_INVALID",
+            lambda: validate_policy_set(policy_dir),
+        ),
+        (
+            "workflows",
+            "WORKFLOW_POLICY_INVALID",
+            lambda: validate_workflow_policy(workflow_dir),
+        ),
+    )
+    for name, error_code, validator in gates:
+        try:
+            details = validator()
+        except ContractError as exc:
+            checks.append({"name": name, "status": "blocked", "error": str(exc)})
+            blockers.append(error_code)
+        else:
+            checks.append({"name": name, "status": "pass", "details": details})
+
+    unique_blockers = sorted(set(blockers))
+    return {
+        "schema_version": 1,
+        "status": "ready" if not unique_blockers else "blocked",
+        "merge_ready": not unique_blockers,
+        "checked_in_contract_ready": not unique_blockers,
+        "blocking_reasons": unique_blockers,
+        "live_github_configuration": "unverified",
+        "external_blockers": ["GITHUB_CONFIGURATION_UNVERIFIED"],
+        "checks": checks,
+    }
 
 
 def load_policy(policy_dir: Path, policy_id: str, *, require_enabled: bool = True) -> dict[str, Any]:
@@ -1060,6 +1315,9 @@ def validate_governance(
 
     codeowner_rules = codeowner_rule_inventory(codeowners)
     owners = set().union(*codeowner_rules.values())
+    missing_codeowner_rules = sorted(
+        set(RELEASE_CODEOWNER_PATTERNS) - set(codeowner_rules)
+    )
     protected_rules_ready = sum(
         len(codeowner_rules.get(pattern, set())) >= minimum_codeowners
         for pattern in RELEASE_CODEOWNER_PATTERNS
@@ -1077,6 +1335,19 @@ def validate_governance(
         and len(signer_identities) >= minimum_signers
         and len(signer_keys) >= minimum_signers
     )
+    blocking_reasons: list[str] = []
+    if len(owners) < minimum_codeowners:
+        blocking_reasons.append("CODEOWNERS_INCOMPLETE")
+    if missing_codeowner_rules:
+        blocking_reasons.append("CODEOWNER_RULES_MISSING")
+    if protected_rules_ready != len(RELEASE_CODEOWNER_PATTERNS):
+        blocking_reasons.append("CODEOWNER_RULES_UNDERPROTECTED")
+    if underprotected_rules:
+        blocking_reasons.append("CODEOWNERS_HAS_UNDERPROTECTED_RULES")
+    if len(signer_identities) < minimum_signers:
+        blocking_reasons.append("RELEASE_SIGNER_IDENTITIES_INCOMPLETE")
+    if len(signer_keys) < minimum_signers:
+        blocking_reasons.append("RELEASE_SIGNER_KEYS_INCOMPLETE")
     readiness = {
         "named_codeowners": len(owners),
         "protected_codeowner_rules_ready": protected_rules_ready,
@@ -1087,8 +1358,13 @@ def validate_governance(
         "minimum_release_signer_identities": minimum_signers,
         "minimum_release_signer_keys": minimum_signers,
         "minimum_environment_reviewers": minimum_reviewers,
+        "required_codeowner_patterns": list(RELEASE_CODEOWNER_PATTERNS),
+        "missing_codeowner_rules": missing_codeowner_rules,
         "underprotected_codeowner_rules": underprotected_rules,
+        "blocking_reasons": blocking_reasons,
         "checked_in_contract_ready": checked_in_contract_ready,
+        "status": "ready" if checked_in_contract_ready else "blocked",
+        "merge_ready": checked_in_contract_ready,
         "live_github_configuration": "unverified",
     }
     if require_ready and len(owners) < minimum_codeowners:
@@ -1491,12 +1767,89 @@ def validate_provenance_value(
 def validate_json_evidence(path: Path, key: str) -> dict[str, Any]:
     value = require_json_object(path, f"{key} evidence")
     if key == "sbom":
-        if not isinstance(value.get("spdxVersion"), str) or not isinstance(value.get("packages"), list):
+        if (
+            not isinstance(value.get("spdxVersion"), str)
+            or not re.fullmatch(r"SPDX-[0-9]+\.[0-9]+", value["spdxVersion"])
+            or not isinstance(value.get("packages"), list)
+            or not value["packages"]
+        ):
             die("SBOM evidence is not an SPDX JSON document")
+    elif key == "licenses":
+        strict_keys(
+            value,
+            {"schema_version", "spdx_version", "package_count", "packages"},
+            "license evidence",
+        )
+        if value["schema_version"] != 1:
+            die("unsupported license evidence schema_version")
+        spdx_version = value["spdx_version"]
+        if not isinstance(spdx_version, str) or not re.fullmatch(
+            r"SPDX-[0-9]+\.[0-9]+", spdx_version
+        ):
+            die("license evidence spdx_version is not canonical")
+        packages = value["packages"]
+        package_count = value["package_count"]
+        if (
+            isinstance(package_count, bool)
+            or not isinstance(package_count, int)
+            or package_count < 1
+            or not isinstance(packages, list)
+            or len(packages) != package_count
+        ):
+            die("license evidence package_count does not match packages")
+        for index, package in enumerate(packages):
+            context = f"license evidence packages[{index}]"
+            if not isinstance(package, dict):
+                die(f"{context} must be an object")
+            strict_keys(package, {"name", "licenses"}, context)
+            name = package["name"]
+            if (
+                not isinstance(name, str)
+                or not name.strip()
+                or "\r" in name
+                or "\n" in name
+            ):
+                die(f"{context}.name must be a non-empty single-line string")
+            licenses = package["licenses"]
+            if not isinstance(licenses, list) or not licenses:
+                die(f"{context}.licenses must contain asserted license strings")
+            if any(
+                not isinstance(license_name, str)
+                or not license_name.strip()
+                or "\r" in license_name
+                or "\n" in license_name
+                for license_name in licenses
+            ):
+                die(f"{context}.licenses must contain unique asserted license strings")
+            if len(licenses) != len(set(licenses)):
+                die(f"{context}.licenses must contain unique asserted license strings")
     elif key == "vulnerabilities":
         if not isinstance(value.get("matches"), list) or not isinstance(value.get("descriptor"), dict):
             die("vulnerability evidence is not a complete Grype report")
     return value
+
+
+def validate_license_evidence_binding(
+    sbom: dict[str, Any], licenses: dict[str, Any]
+) -> None:
+    """Require the derived license report to describe the exact SPDX packages."""
+
+    sbom_packages = sbom.get("packages")
+    if not isinstance(sbom_packages, list) or not sbom_packages:
+        die("SBOM evidence must contain packages before license binding")
+    sbom_names: list[str] = []
+    for index, package in enumerate(sbom_packages):
+        if not isinstance(package, dict):
+            die(f"SBOM package {index} must be an object before license binding")
+        name = package.get("name")
+        if not isinstance(name, str) or not name.strip() or "\r" in name or "\n" in name:
+            die(f"SBOM package {index} must have a canonical name before license binding")
+        sbom_names.append(name)
+    license_names = [package["name"] for package in licenses["packages"]]
+    if licenses["spdx_version"] != sbom["spdxVersion"]:
+        die("license evidence SPDX version does not match SBOM")
+    if licenses["package_count"] != len(sbom_names) or license_names != sbom_names:
+        die("license evidence package list does not match SBOM")
 
 
 def create_evidence_lock(
@@ -1505,6 +1858,7 @@ def create_evidence_lock(
     build_evidence_path: Path,
     archive: Path,
     sbom: Path,
+    licenses: Path,
     provenance: Path,
     vulnerabilities: Path,
     release_control_sha: str,
@@ -1520,7 +1874,9 @@ def create_evidence_lock(
         die("evidence lock archive SHA-256 differs from build evidence")
     if archive_digest != build_evidence_value["artifact"]["digest"]:
         die("evidence lock artifact digest differs from build evidence")
-    validate_json_evidence(sbom, "sbom")
+    sbom_value = validate_json_evidence(sbom, "sbom")
+    licenses_value = validate_json_evidence(licenses, "licenses")
+    validate_license_evidence_binding(sbom_value, licenses_value)
     provenance_value = validate_json_evidence(provenance, "provenance")
     validate_provenance_value(provenance_value, intent, archive_digest, control_sha)
     validate_json_evidence(vulnerabilities, "vulnerabilities")
@@ -1539,6 +1895,7 @@ def create_evidence_lock(
         "build_evidence": evidence_file(build_evidence_path, "build_evidence"),
         "evidence": {
             "sbom": evidence_file(sbom, "sbom"),
+            "licenses": evidence_file(licenses, "licenses"),
             "provenance": evidence_file(provenance, "provenance"),
             "vulnerabilities": evidence_file(vulnerabilities, "vulnerabilities"),
         },
@@ -1605,8 +1962,8 @@ def verify_evidence_lock(
     evidence = value["evidence"]
     if not isinstance(evidence, dict):
         die("evidence lock evidence must be an object")
-    strict_keys(evidence, {"sbom", "provenance", "vulnerabilities"}, "evidence lock evidence")
-    for key in ("sbom", "provenance", "vulnerabilities"):
+    strict_keys(evidence, {"sbom", "licenses", "provenance", "vulnerabilities"}, "evidence lock evidence")
+    for key in ("sbom", "licenses", "provenance", "vulnerabilities"):
         validate_file_hash(evidence[key], key)
 
     if sha256_file(build_evidence_path) != value["build_evidence"]["sha256"]:
@@ -1626,11 +1983,15 @@ def verify_evidence_lock(
         if archive_hash != value["oci_archive_sha256"]:
             die("OCI archive SHA-256 differs from evidence lock")
 
-    for key in ("sbom", "provenance", "vulnerabilities"):
+    for key in ("sbom", "licenses", "provenance", "vulnerabilities"):
         path = evidence_dir / evidence[key]["filename"]
         if sha256_file(path) != evidence[key]["sha256"]:
             die(f"{key} evidence SHA-256 differs from evidence lock")
-    validate_json_evidence(evidence_dir / evidence["sbom"]["filename"], "sbom")
+    sbom_value = validate_json_evidence(evidence_dir / evidence["sbom"]["filename"], "sbom")
+    licenses_value = validate_json_evidence(
+        evidence_dir / evidence["licenses"]["filename"], "licenses"
+    )
+    validate_license_evidence_binding(sbom_value, licenses_value)
     provenance_value = validate_json_evidence(
         evidence_dir / evidence["provenance"]["filename"], "provenance"
     )
@@ -1975,6 +2336,7 @@ def finalize_release(
     for key in (
         "artifact_signature",
         "build_evidence_attestation",
+        "license_attestation",
         "sbom_attestation",
         "provenance_attestation",
         "vulnerability_attestation",
@@ -2019,7 +2381,7 @@ def validate_release_bundle_files(
         path = evidence_dir / evidence[key]["filename"]
         if sha256_file(path) != evidence[key]["sha256"]:
             die(f"{key} evidence SHA-256 differs from release record")
-        if key not in {"sbom", "provenance", "vulnerabilities", "lock"}:
+        if key not in {"sbom", "licenses", "provenance", "vulnerabilities", "lock"}:
             require_json_object(path, f"{key} evidence")
 
 
@@ -2212,6 +2574,22 @@ def main() -> int:
         help="print checked-in readiness diagnostics without allowing an incomplete release",
     )
 
+    readiness_parser = sub.add_parser(
+        "merge-readiness",
+        help="diagnose checked-in merge gates without inspecting live GitHub configuration",
+    )
+    readiness_parser.add_argument("--codeowners", type=Path, required=True)
+    readiness_parser.add_argument("--allowed-signers", type=Path, required=True)
+    readiness_parser.add_argument("--settings", type=Path, required=True)
+    readiness_parser.add_argument("--policy-dir", type=Path, required=True)
+    readiness_parser.add_argument("--contract-dir", type=Path, required=True)
+    readiness_parser.add_argument("--workflow-dir", type=Path, required=True)
+    readiness_parser.add_argument(
+        "--require-ready",
+        action="store_true",
+        help="return failure when any checked-in merge gate is blocked",
+    )
+
     intent_parser = sub.add_parser("validate-intent")
     intent_parser.add_argument("--intent", type=Path, required=True)
     intent_parser.add_argument("--signature", type=Path, required=True)
@@ -2237,6 +2615,7 @@ def main() -> int:
     lock_parser.add_argument("--build-evidence", type=Path, required=True)
     lock_parser.add_argument("--archive", type=Path, required=True)
     lock_parser.add_argument("--sbom", type=Path, required=True)
+    lock_parser.add_argument("--licenses", type=Path, required=True)
     lock_parser.add_argument("--provenance", type=Path, required=True)
     lock_parser.add_argument("--vulnerabilities", type=Path, required=True)
     lock_parser.add_argument("--release-control-sha", required=True)
@@ -2325,6 +2704,18 @@ def main() -> int:
             )
             if args.allow_incomplete:
                 print(json.dumps(readiness, sort_keys=True, separators=(",", ":")))
+        elif args.command == "merge-readiness":
+            readiness = merge_readiness(
+                args.codeowners,
+                args.allowed_signers,
+                args.settings,
+                args.policy_dir,
+                args.contract_dir,
+                args.workflow_dir,
+            )
+            print(json.dumps(readiness, sort_keys=True, separators=(",", ":")))
+            if args.require_ready and not readiness["merge_ready"]:
+                die("merge-readiness is blocked")
         elif args.command == "validate-intent":
             intent, policy = validate_intent(
                 args.intent,
@@ -2362,6 +2753,7 @@ def main() -> int:
                     args.build_evidence,
                     args.archive,
                     args.sbom,
+                    args.licenses,
                     args.provenance,
                     args.vulnerabilities,
                     args.release_control_sha,

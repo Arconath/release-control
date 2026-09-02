@@ -61,6 +61,21 @@ class LicensePolicyTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("at least one package", result.stderr)
 
+    def test_noncanonical_spdx_version_fails_closed(self) -> None:
+        result = self.run_check(
+            {
+                "spdxVersion": "SPDX-2.3-preview",
+                "packages": [
+                    {
+                        "name": "example",
+                        "licenseConcluded": "Apache-2.0",
+                    }
+                ],
+            }
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("spdxVersion", result.stderr)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

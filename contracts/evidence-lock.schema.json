@@ -49,9 +49,10 @@
     "evidence": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["sbom", "provenance", "vulnerabilities"],
+      "required": ["sbom", "licenses", "provenance", "vulnerabilities"],
       "properties": {
         "sbom": {"$ref": "#/$defs/sbom_file"},
+        "licenses": {"$ref": "#/$defs/license_file"},
         "provenance": {"$ref": "#/$defs/provenance_file"},
         "vulnerabilities": {"$ref": "#/$defs/vulnerability_file"}
       }
@@ -71,6 +72,12 @@
       "allOf": [
         {"$ref": "#/$defs/file_hash"},
         {"type": "object", "properties": {"filename": {"const": "sbom.spdx.json"}}}
+      ]
+    },
+    "license_file": {
+      "allOf": [
+        {"$ref": "#/$defs/file_hash"},
+        {"type": "object", "properties": {"filename": {"const": "licenses.json"}}}
       ]
     },
     "provenance_file": {

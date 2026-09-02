@@ -39,14 +39,16 @@
     "evidence": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["lock", "sbom", "provenance", "vulnerabilities", "artifact_signature", "build_evidence_attestation", "sbom_attestation", "provenance_attestation", "vulnerability_attestation"],
+      "required": ["lock", "sbom", "licenses", "provenance", "vulnerabilities", "artifact_signature", "build_evidence_attestation", "license_attestation", "sbom_attestation", "provenance_attestation", "vulnerability_attestation"],
       "properties": {
         "lock": {"allOf": [{"$ref": "#/$defs/file_hash"}, {"type": "object", "properties": {"filename": {"const": "evidence-lock.json"}}}]},
         "sbom": {"allOf": [{"$ref": "#/$defs/file_hash"}, {"type": "object", "properties": {"filename": {"const": "sbom.spdx.json"}}}]},
+        "licenses": {"allOf": [{"$ref": "#/$defs/file_hash"}, {"type": "object", "properties": {"filename": {"const": "licenses.json"}}}]},
         "provenance": {"allOf": [{"$ref": "#/$defs/file_hash"}, {"type": "object", "properties": {"filename": {"const": "provenance.intoto.json"}}}]},
         "vulnerabilities": {"allOf": [{"$ref": "#/$defs/file_hash"}, {"type": "object", "properties": {"filename": {"const": "vulnerabilities.json"}}}]},
         "artifact_signature": {"allOf": [{"$ref": "#/$defs/file_hash"}, {"type": "object", "properties": {"filename": {"const": "artifact.sigstore.json"}}}]},
         "build_evidence_attestation": {"allOf": [{"$ref": "#/$defs/file_hash"}, {"type": "object", "properties": {"filename": {"const": "build-evidence.attestation.sigstore.json"}}}]},
+        "license_attestation": {"allOf": [{"$ref": "#/$defs/file_hash"}, {"type": "object", "properties": {"filename": {"const": "license.attestation.sigstore.json"}}}]},
         "sbom_attestation": {"allOf": [{"$ref": "#/$defs/file_hash"}, {"type": "object", "properties": {"filename": {"const": "sbom.attestation.sigstore.json"}}}]},
         "provenance_attestation": {"allOf": [{"$ref": "#/$defs/file_hash"}, {"type": "object", "properties": {"filename": {"const": "provenance.attestation.sigstore.json"}}}]},
         "vulnerability_attestation": {"allOf": [{"$ref": "#/$defs/file_hash"}, {"type": "object", "properties": {"filename": {"const": "vulnerability.attestation.sigstore.json"}}}]}

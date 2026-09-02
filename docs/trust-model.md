@@ -30,8 +30,11 @@ product verification or build command; it is not a source-reader, registry,
 OIDC, package, or deployment credential.
 
 The checked-in governance diagnostic is not a live GitHub check. With
-`--allow-incomplete`, it reports observed signer/CODEOWNER counts,
-`checked_in_contract_ready`, and `live_github_configuration: "unverified"`.
+`--allow-incomplete`, it reports observed signer/CODEOWNER counts, explicit
+blocking reason codes, `checked_in_contract_ready`, and
+`live_github_configuration: "unverified"`. The `merge-readiness` command adds
+the closed-world schema, policy, action-pinning, permissions, and private-runner
+gates, while keeping the live GitHub configuration as a separate external hold.
 The trusted release workflow omits that flag and aborts before source access
 when the two-person contract is incomplete. Actual branch protection,
 environment reviewers, and organization settings must still be verified in
@@ -60,7 +63,8 @@ the intent is absent, non-canonical, expired, signed by an unknown key, or
 mismatched with policy; the source commit or tree differs; a handoff recipient,
 run ID, ciphertext hash, decrypted hash, or canonical filename differs; age is
 unavailable; registry host or robot credentials are absent; tests, SBOM,
-provenance, vulnerability evidence, or attestation verification fails; or the
+license evidence, provenance, vulnerability evidence, or attestation
+verification fails; or the
 OCI archive changes in transit. A missing handoff identity fails closed before
 source or candidate use. The offline diagnostic never changes this gate.
 
@@ -87,8 +91,9 @@ digest, evidence-lock hashes, and rollback digest before opening a deployment
 PR.
 
 GitHub Actions artifacts contain only age ciphertext for private source and
-OCI candidates; release, promotion, and SBOM evidence is digest metadata and
-does not carry the source archive. Artifact retention is intentionally short
+OCI candidates; release, promotion, SBOM, license, provenance, and
+vulnerability evidence is digest metadata and does not carry the source
+archive. Artifact retention is intentionally short
 for transport, and runner cleanup removes plaintext before the job exits.
 
 GHCR mirroring, if later enabled, copies from the signed canonical Distribution

@@ -570,6 +570,14 @@ jobs:
           syft oci-archive:candidate/candidate.oci.tar -o spdx-json=candidate/sbom.spdx.json
           grype sbom:candidate/sbom.spdx.json --fail-on high -o json > candidate/vulnerabilities.json
 
+      - name: Enforce license evidence for every SBOM package
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 control/scripts/check-license-policy.py \
+            --sbom candidate/sbom.spdx.json \
+            --output candidate/licenses.json
+
       - name: Record exact source and OCI identity
         shell: bash
         env:
@@ -603,6 +611,7 @@ jobs:
             --build-evidence candidate/build-evidence.json \
             --archive candidate/candidate.oci.tar \
             --sbom candidate/sbom.spdx.json \
+            --licenses candidate/licenses.json \
             --provenance candidate/provenance.intoto.json \
             --vulnerabilities candidate/vulnerabilities.json \
             --release-control-sha "$GITHUB_SHA" \
@@ -647,6 +656,7 @@ jobs:
             candidate/build-evidence.json
             candidate/evidence-lock.json
             candidate/sbom.spdx.json
+            candidate/licenses.json
             candidate/provenance.intoto.json
             candidate/vulnerabilities.json
           if-no-files-found: error
@@ -957,6 +967,9 @@ jobs:
           cosign attest --yes --bundle candidate/build-evidence.attestation.sigstore.json \
             --type https://arconath.com/BuildEvidence/v1 \
             --predicate candidate/build-evidence.json "$reference"
+          cosign attest --yes --bundle candidate/license.attestation.sigstore.json \
+            --type https://arconath.com/LicenseEvidence/v1 \
+            --predicate candidate/licenses.json "$reference"
           cosign attest --yes --bundle candidate/sbom.attestation.sigstore.json \
             --type spdxjson --predicate candidate/sbom.spdx.json "$reference"
           cosign attest --yes --bundle candidate/provenance.attestation.sigstore.json \
@@ -998,6 +1011,12 @@ jobs:
             https://arconath.com/BuildEvidence/v1 \
             candidate/build-evidence.json \
             candidate/build-evidence.verified-attestation.json
+          verify_attestation \
+            candidate/license.attestation.sigstore.json \
+            https://arconath.com/LicenseEvidence/v1 \
+            https://arconath.com/LicenseEvidence/v1 \
+            candidate/licenses.json \
+            candidate/license.verified-attestation.json
           verify_attestation \
             candidate/sbom.attestation.sigstore.json \
             spdxjson \
@@ -1041,10 +1060,12 @@ jobs:
             candidate/evidence-lock.json
             candidate/release-record.json
             candidate/sbom.spdx.json
+            candidate/licenses.json
             candidate/provenance.intoto.json
             candidate/vulnerabilities.json
             candidate/artifact.sigstore.json
             candidate/build-evidence.attestation.sigstore.json
+            candidate/license.attestation.sigstore.json
             candidate/sbom.attestation.sigstore.json
             candidate/provenance.attestation.sigstore.json
             candidate/vulnerability.attestation.sigstore.json
@@ -1202,10 +1223,12 @@ jobs:
             evidence/evidence-lock.json
             evidence/release-record.json
             evidence/sbom.spdx.json
+            evidence/licenses.json
             evidence/provenance.intoto.json
             evidence/vulnerabilities.json
             evidence/artifact.sigstore.json
             evidence/build-evidence.attestation.sigstore.json
+            evidence/license.attestation.sigstore.json
             evidence/sbom.attestation.sigstore.json
             evidence/provenance.attestation.sigstore.json
             evidence/vulnerability.attestation.sigstore.json
@@ -1239,10 +1262,12 @@ jobs:
             evidence/evidence-lock.json
             evidence/release-record.json
             evidence/sbom.spdx.json
+            evidence/licenses.json
             evidence/provenance.intoto.json
             evidence/vulnerabilities.json
             evidence/artifact.sigstore.json
             evidence/build-evidence.attestation.sigstore.json
+            evidence/license.attestation.sigstore.json
             evidence/sbom.attestation.sigstore.json
             evidence/provenance.attestation.sigstore.json
             evidence/vulnerability.attestation.sigstore.json

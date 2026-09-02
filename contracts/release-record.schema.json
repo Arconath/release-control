@@ -65,6 +65,12 @@
         {"type": "object", "properties": {"filename": {"const": "sbom.spdx.json"}}}
       ]
     },
+    "license_file": {
+      "allOf": [
+        {"$ref": "#/$defs/file_hash"},
+        {"type": "object", "properties": {"filename": {"const": "licenses.json"}}}
+      ]
+    },
     "provenance_file": {
       "allOf": [
         {"$ref": "#/$defs/file_hash"},
@@ -87,6 +93,12 @@
       "allOf": [
         {"$ref": "#/$defs/file_hash"},
         {"type": "object", "properties": {"filename": {"const": "build-evidence.attestation.sigstore.json"}}}
+      ]
+    },
+    "license_attestation_file": {
+      "allOf": [
+        {"$ref": "#/$defs/file_hash"},
+        {"type": "object", "properties": {"filename": {"const": "license.attestation.sigstore.json"}}}
       ]
     },
     "sbom_attestation_file": {
@@ -113,10 +125,12 @@
       "required": [
         "lock",
         "sbom",
+        "licenses",
         "provenance",
         "vulnerabilities",
         "artifact_signature",
         "build_evidence_attestation",
+        "license_attestation",
         "sbom_attestation",
         "provenance_attestation",
         "vulnerability_attestation"
@@ -124,10 +138,12 @@
       "properties": {
         "lock": {"$ref": "#/$defs/lock_file"},
         "sbom": {"$ref": "#/$defs/sbom_file"},
+        "licenses": {"$ref": "#/$defs/license_file"},
         "provenance": {"$ref": "#/$defs/provenance_file"},
         "vulnerabilities": {"$ref": "#/$defs/vulnerability_file"},
         "artifact_signature": {"$ref": "#/$defs/signature_file"},
         "build_evidence_attestation": {"$ref": "#/$defs/build_evidence_attestation_file"},
+        "license_attestation": {"$ref": "#/$defs/license_attestation_file"},
         "sbom_attestation": {"$ref": "#/$defs/sbom_attestation_file"},
         "provenance_attestation": {"$ref": "#/$defs/provenance_attestation_file"},
         "vulnerability_attestation": {"$ref": "#/$defs/vulnerability_attestation_file"}

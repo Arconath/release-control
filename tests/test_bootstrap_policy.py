@@ -137,6 +137,7 @@ class BootstrapPolicyTests(unittest.TestCase):
             "artifact-lock-proposal.schema.json",
             "build-evidence.schema.json",
             "evidence-lock.schema.json",
+            "license-evidence.schema.json",
             "product-policy.schema.json",
             "promotion-manifest.schema.json",
             "provenance.schema.json",
@@ -184,10 +185,12 @@ class BootstrapPolicyTests(unittest.TestCase):
         expected = {
             "lock",
             "sbom",
+            "licenses",
             "provenance",
             "vulnerabilities",
             "artifact_signature",
             "build_evidence_attestation",
+            "license_attestation",
             "sbom_attestation",
             "provenance_attestation",
             "vulnerability_attestation",
@@ -206,10 +209,12 @@ class BootstrapPolicyTests(unittest.TestCase):
         expected = {
             "lock": "evidence-lock.json",
             "sbom": "sbom.spdx.json",
+            "licenses": "licenses.json",
             "provenance": "provenance.intoto.json",
             "vulnerabilities": "vulnerabilities.json",
             "artifact_signature": "artifact.sigstore.json",
             "build_evidence_attestation": "build-evidence.attestation.sigstore.json",
+            "license_attestation": "license.attestation.sigstore.json",
             "sbom_attestation": "sbom.attestation.sigstore.json",
             "provenance_attestation": "provenance.attestation.sigstore.json",
             "vulnerability_attestation": "vulnerability.attestation.sigstore.json",
@@ -226,6 +231,19 @@ class BootstrapPolicyTests(unittest.TestCase):
                     properties[key]["allOf"][1]["properties"]["filename"]["const"],
                     filename,
                 )
+
+    def test_license_evidence_schema_is_nonempty_and_strict(self) -> None:
+        schema = json.loads(
+            (ROOT / "contracts/license-evidence.schema.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(
+            schema["required"], ["schema_version", "spdx_version", "package_count", "packages"]
+        )
+        self.assertEqual(schema["properties"]["package_count"]["minimum"], 1)
+        packages = schema["properties"]["packages"]
+        self.assertEqual(packages["minItems"], 1)
+        self.assertEqual(packages["items"]["required"], ["name", "licenses"])
+        self.assertEqual(packages["items"]["properties"]["licenses"]["minItems"], 1)
 
     def test_artifact_lock_proposal_schema_is_closed_world_and_product_only(self) -> None:
         schema = json.loads(

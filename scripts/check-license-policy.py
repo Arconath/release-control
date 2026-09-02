@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 from typing import Any, NoReturn
@@ -15,6 +16,8 @@ def fail(message: str) -> NoReturn:
 
 
 def load(path: Path) -> dict[str, Any]:
+    if path.is_symlink() or not path.is_file():
+        fail(f"SBOM must be a regular non-symlink file: {path}")
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
@@ -48,7 +51,9 @@ def license_values(package: dict[str, Any], context: str) -> list[str]:
 
 def build_report(sbom: dict[str, Any]) -> dict[str, Any]:
     spdx_version = sbom.get("spdxVersion")
-    if not isinstance(spdx_version, str) or not spdx_version.startswith("SPDX-"):
+    if not isinstance(spdx_version, str) or not re.fullmatch(
+        r"SPDX-[0-9]+\.[0-9]+", spdx_version
+    ):
         fail("spdxVersion is missing or is not an SPDX document")
     packages = sbom.get("packages")
     if not isinstance(packages, list) or not packages:
@@ -82,10 +87,11 @@ def main() -> int:
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     report = build_report(load(args.sbom))
+    if args.output.is_symlink() or (args.output.exists() and not args.output.is_file()):
+        fail(f"output must be a regular non-symlink file: {args.output}")
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    args.output.write_text(
-        json.dumps(report, sort_keys=True, separators=(",", ":")) + "\n",
-        encoding="utf-8",
+    args.output.write_bytes(
+        (json.dumps(report, sort_keys=True, separators=(",", ":")) + "\n").encode()
     )
     print(f"license policy: PASS ({report['package_count']} packages)")
     return 0

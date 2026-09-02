@@ -50,9 +50,11 @@ reviewed platform-apps digest proposal
 
 Every transfer is bound to the source repository, full commit SHA, Git tree
 SHA, the protected `release-control` commit SHA, OCI manifest digest, and
-SHA-256 of the transported OCI archive. Build evidence includes the SBOM,
-provenance, and vulnerability report; the evidence lock hashes those files
-before registry mutation. Private source and the candidate OCI archive never
+SHA-256 of the transported OCI archive. Build evidence includes the SBOM, the
+derived SPDX license report, provenance, and vulnerability report; the
+evidence lock hashes all four files before registry mutation. Publication
+adds a signed license attestation alongside the artifact, SBOM, provenance,
+and vulnerability attestations. Private source and the candidate OCI archive never
 enter a GitHub Actions artifact in plaintext. The cross-job transports are
 age-encrypted, carry a canonical run-bound handoff envelope, and are deleted
 from the runner before the next boundary. Only digest-bound evidence and the
@@ -81,6 +83,8 @@ python3 scripts/release_control.py validate-intent \
 
 Intent and policy schemas are documented in [contracts/release-intent.schema.json](contracts/release-intent.schema.json)
 and [contracts/product-policy.schema.json](contracts/product-policy.schema.json).
+The derived license evidence contract is documented in
+[contracts/license-evidence.schema.json](contracts/license-evidence.schema.json).
 The intent must include the prior production digest. A first production release
 uses the explicitly documented empty baseline digest, not a missing field.
 
@@ -139,7 +143,12 @@ separate external gate that this offline validator cannot prove; they must be
 verified before production activation. A diagnostic's
 `checked_in_contract_ready` field is not live GitHub evidence; its
 `live_github_configuration` field remains `unverified` because this offline
-validator does not call GitHub.
+validator does not call GitHub. Run the checked-in merge-gate diagnostic with
+`python3 scripts/release_control.py merge-readiness --codeowners .github/CODEOWNERS
+--allowed-signers policies/release-signers --settings bootstrap/repository-settings.json
+--policy-dir policies/products --contract-dir contracts --workflow-dir .github/workflows`.
+Its `merge_ready` result covers only local contract gates; the external GitHub
+configuration remains an explicit hold until verified separately.
 
 Do not add a personal access token. The source GitHub App token is short-lived
 and repository scoped. Age transport identities are separate from the source
@@ -187,7 +196,12 @@ Cosign, OIDC, or promotion credentials.
 The suite covers canonical source identity, signed and expiring intents, strict
 policy matching, run-bound age handoff envelopes, ciphertext and plaintext
 integrity, job credential separation, exact OCI descriptor and digest
-propagation, SBOM, SLSA provenance, vulnerability evidence, signed attestations,
-promotion identity, and rollback manifests. It is offline: it does not create
+propagation, SBOM, SPDX license evidence, SLSA provenance, vulnerability
+evidence, signed attestations, promotion identity, and rollback manifests. It
+also checks the closed-world contract inventory, action pinning, permissions,
+and private runner policy. It is offline: it does not create
 credentials, contact the registry, configure GitHub governance, publish images,
 or mutate GitOps.
+Passing this offline check is not evidence of a real signed release; signer
+keys, protected GitHub configuration, registry credentials, and an actual
+workflow run remain required before publication.

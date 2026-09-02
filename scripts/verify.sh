@@ -22,10 +22,20 @@ governance_readiness="$(python3 scripts/release_control.py validate-governance \
 printf 'governance readiness (checked-in diagnostic; live GitHub configuration is unverified): %s\n' \
   "$governance_readiness"
 
+merge_readiness="$(python3 scripts/release_control.py merge-readiness \
+  --codeowners .github/CODEOWNERS \
+  --allowed-signers policies/release-signers \
+  --settings bootstrap/repository-settings.json \
+  --policy-dir policies/products \
+  --contract-dir contracts \
+  --workflow-dir .github/workflows)"
+printf 'merge readiness (checked-in diagnostic; live GitHub configuration is unverified): %s\n' \
+  "$merge_readiness"
+
 while IFS= read -r policy; do
   python3 scripts/release_control.py validate-policy \
     --policy "$policy" \
     --allow-disabled
 done < <(find policies/products -type f \( -name '*.json' -o -name '*.json.disabled' \) -print | sort)
 
-printf 'release-control verification passed\n'
+printf 'release-control source verification passed; release readiness remains gated by the diagnostics above\n'
