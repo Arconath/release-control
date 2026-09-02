@@ -40,5 +40,51 @@
         "recipient": {"type": "string", "pattern": "^age1[a-z0-9]{20,200}$"}
       }
     }
-  }
+  },
+  "allOf": [
+    {
+      "if": {
+        "type": "object",
+        "required": ["handoff_type"],
+        "properties": {
+          "handoff_type": {"const": "source"}
+        }
+      },
+      "then": {
+        "type": "object",
+        "required": ["ciphertext"],
+        "properties": {
+          "ciphertext": {
+            "type": "object",
+            "required": ["filename"],
+            "properties": {
+              "filename": {"const": "product.tar.age"}
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "type": "object",
+        "required": ["handoff_type"],
+        "properties": {
+          "handoff_type": {"const": "candidate"}
+        }
+      },
+      "then": {
+        "type": "object",
+        "required": ["ciphertext"],
+        "properties": {
+          "ciphertext": {
+            "type": "object",
+            "required": ["filename"],
+            "properties": {
+              "filename": {"const": "candidate.oci.tar.age"}
+            }
+          }
+        }
+      }
+    }
+  ]
 }

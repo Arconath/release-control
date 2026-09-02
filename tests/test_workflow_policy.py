@@ -75,6 +75,10 @@ class WorkflowPolicyTests(unittest.TestCase):
             text,
         )
 
+    def test_same_repository_stacked_pull_requests_are_validated(self) -> None:
+        text = (WORKFLOWS / "validate.yml").read_text(encoding="utf-8")
+        self.assertNotIn("github.event.pull_request.base.ref", text)
+
     def test_trusted_workflows_require_the_canonical_repository_event_and_ref(self) -> None:
         release = (WORKFLOWS / "release.yml").read_text(encoding="utf-8")
         for name in (

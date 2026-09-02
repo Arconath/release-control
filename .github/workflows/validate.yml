@@ -15,7 +15,7 @@ concurrency:
 jobs:
   validate:
     name: contracts and workflow policy
-    if: ${{ github.repository == 'Arconath/release-control' && (github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == 'Arconath/release-control' && github.event.pull_request.base.ref == 'main')) }}
+    if: ${{ github.repository == 'Arconath/release-control' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == 'Arconath/release-control') }}
     runs-on:
       group: arconath-jit
       labels: [self-hosted, linux, x64, arconath-jit, rootless-buildkit]
@@ -36,7 +36,6 @@ jobs:
           [[ "$GITHUB_EVENT_NAME" == "pull_request" || "$GITHUB_EVENT_NAME" == "push" ]]
           if [[ "$GITHUB_EVENT_NAME" == "pull_request" ]]; then
             [[ "$PR_HEAD_REPOSITORY" == "Arconath/release-control" ]]
-            [[ "${{ github.event.pull_request.base.ref }}" == "main" ]]
           else
             [[ "$GITHUB_REF" == "refs/heads/main" ]]
           fi

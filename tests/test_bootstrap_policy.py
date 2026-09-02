@@ -154,7 +154,29 @@ class BootstrapPolicyTests(unittest.TestCase):
                 self.assertEqual(value["type"], "object")
                 self.assertFalse(value["additionalProperties"])
                 self.assertTrue(value["required"])
-                self.assertTrue(value.get("$id", "").startswith("https://release-control.arconath.com/contracts/"))
+                self.assertEqual(
+                    value.get("$id"),
+                    f"https://release-control.arconath.com/contracts/{path.name}",
+                )
+
+    def test_source_handoff_schema_binds_kind_to_ciphertext_filename(self) -> None:
+        schema = json.loads(
+            (ROOT / "contracts/source-handoff.schema.json").read_text(encoding="utf-8")
+        )
+        bindings = {}
+        for condition in schema["allOf"]:
+            kind = condition["if"]["properties"]["handoff_type"]["const"]
+            filename = condition["then"]["properties"]["ciphertext"]["properties"][
+                "filename"
+            ]["const"]
+            bindings[kind] = filename
+        self.assertEqual(
+            bindings,
+            {
+                "source": "product.tar.age",
+                "candidate": "candidate.oci.tar.age",
+            },
+        )
 
     def test_schema_object_keywords_are_strictly_typed_and_self_contained(self) -> None:
         """Keep every object sub-schema compatible with strict Draft 2020-12 tools."""

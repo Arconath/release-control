@@ -880,8 +880,9 @@ def validate_contract_inventory(contract_dir: Path) -> dict[str, int]:
         if not isinstance(required, list) or not required:
             die(f"{filename}: root schema must declare required properties")
         schema_id = value.get("$id")
-        if not isinstance(schema_id, str) or not schema_id.startswith(CONTRACT_SCHEMA_ID_PREFIX):
-            die(f"{filename}: schema $id is not in the canonical namespace")
+        expected_schema_id = f"{CONTRACT_SCHEMA_ID_PREFIX}{filename}"
+        if schema_id != expected_schema_id:
+            die(f"{filename}: schema $id must be {expected_schema_id}")
         _validate_schema_structure(value, filename)
     return {"schema_files": len(EXPECTED_CONTRACT_FILES)}
 

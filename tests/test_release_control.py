@@ -587,6 +587,19 @@ class ReleaseControlTests(unittest.TestCase):
         self.assertEqual(workflows["permission_blocks"], 8)
         self.assertGreater(workflows["external_actions"], 0)
 
+    def test_contract_inventory_rejects_a_schema_id_alias(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            contract_dir = Path(directory)
+            for source in (ROOT / "contracts").iterdir():
+                target = contract_dir / source.name
+                target.write_bytes(source.read_bytes())
+            aliased = contract_dir / "source-handoff.schema.json"
+            value = json.loads(aliased.read_text(encoding="utf-8"))
+            value["$id"] = "https://release-control.arconath.com/contracts/alias.json"
+            write_json(aliased, value)
+            with self.assertRaisesRegex(rc.ContractError, r"schema \$id must be"):
+                rc.validate_contract_inventory(contract_dir)
+
     def test_merge_readiness_cli_has_explicit_fail_closed_mode(self) -> None:
         command = [
             "python3",
