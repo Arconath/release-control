@@ -1,5 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://release-control.arconath.com/contracts/source-handoff.schema.json",
   "title": "Arconath encrypted source handoff",
   "type": "object",
   "additionalProperties": false,
@@ -27,14 +28,14 @@
         "tree_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"}
       }
     },
-    "plaintext_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "plaintext_sha256": {"type": "string", "pattern": "^(?!0{64}$)[0-9a-f]{64}$"},
     "ciphertext": {
       "type": "object",
       "additionalProperties": false,
       "required": ["filename", "sha256", "encryption", "recipient"],
       "properties": {
         "filename": {"enum": ["product.tar.age", "candidate.oci.tar.age"]},
-        "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "sha256": {"type": "string", "pattern": "^(?!0{64}$)[0-9a-f]{64}$"},
         "encryption": {"const": "age-v1"},
         "recipient": {"type": "string", "pattern": "^age1[a-z0-9]{20,200}$"}
       }

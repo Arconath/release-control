@@ -1,0 +1,137 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://release-control.arconath.com/contracts/release-record.schema.json",
+  "title": "Arconath published release record",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "intent_id",
+    "release_control_sha",
+    "source",
+    "artifact",
+    "oci_archive_sha256",
+    "evidence"
+  ],
+  "properties": {
+    "schema_version": {"const": 1},
+    "intent_id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{7,127}$"},
+    "release_control_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "source": {"$ref": "#/$defs/source"},
+    "artifact": {"$ref": "#/$defs/artifact"},
+    "oci_archive_sha256": {"type": "string", "pattern": "^(?!0{64}$)[0-9a-f]{64}$"},
+    "evidence": {"$ref": "#/$defs/evidence"}
+  },
+  "$defs": {
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository", "commit_sha", "tree_sha"],
+      "properties": {
+        "repository": {"type": "string", "pattern": "^Arconath/[a-z0-9][a-z0-9-]{1,99}$"},
+        "commit_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+        "tree_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"}
+      }
+    },
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository", "digest", "reference", "version"],
+      "properties": {
+        "repository": {"type": "string", "pattern": "^registry\\.arconath\\.internal/arconath/[a-z0-9][a-z0-9._-]*(?:/[a-z0-9][a-z0-9._-]*)*$"},
+        "digest": {"type": "string", "pattern": "^sha256:(?!0{64}$)[0-9a-f]{64}$"},
+        "reference": {"type": "string", "pattern": "^registry\\.arconath\\.internal/arconath/[a-z0-9][a-z0-9._-]*(?:/[a-z0-9][a-z0-9._-]*)*@sha256:(?!0{64}$)[0-9a-f]{64}$"},
+        "version": {"type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(?:-[0-9A-Za-z.-]+)?$"}
+      }
+    },
+    "file_hash": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["filename", "sha256"],
+      "properties": {
+        "filename": {"type": "string", "minLength": 1},
+        "sha256": {"type": "string", "pattern": "^(?!0{64}$)[0-9a-f]{64}$"}
+      }
+    },
+    "lock_file": {
+      "allOf": [
+        {"$ref": "#/$defs/file_hash"},
+        {"type": "object", "properties": {"filename": {"const": "evidence-lock.json"}}}
+      ]
+    },
+    "sbom_file": {
+      "allOf": [
+        {"$ref": "#/$defs/file_hash"},
+        {"type": "object", "properties": {"filename": {"const": "sbom.spdx.json"}}}
+      ]
+    },
+    "provenance_file": {
+      "allOf": [
+        {"$ref": "#/$defs/file_hash"},
+        {"type": "object", "properties": {"filename": {"const": "provenance.intoto.json"}}}
+      ]
+    },
+    "vulnerability_file": {
+      "allOf": [
+        {"$ref": "#/$defs/file_hash"},
+        {"type": "object", "properties": {"filename": {"const": "vulnerabilities.json"}}}
+      ]
+    },
+    "signature_file": {
+      "allOf": [
+        {"$ref": "#/$defs/file_hash"},
+        {"type": "object", "properties": {"filename": {"const": "artifact.sigstore.json"}}}
+      ]
+    },
+    "build_evidence_attestation_file": {
+      "allOf": [
+        {"$ref": "#/$defs/file_hash"},
+        {"type": "object", "properties": {"filename": {"const": "build-evidence.attestation.sigstore.json"}}}
+      ]
+    },
+    "sbom_attestation_file": {
+      "allOf": [
+        {"$ref": "#/$defs/file_hash"},
+        {"type": "object", "properties": {"filename": {"const": "sbom.attestation.sigstore.json"}}}
+      ]
+    },
+    "provenance_attestation_file": {
+      "allOf": [
+        {"$ref": "#/$defs/file_hash"},
+        {"type": "object", "properties": {"filename": {"const": "provenance.attestation.sigstore.json"}}}
+      ]
+    },
+    "vulnerability_attestation_file": {
+      "allOf": [
+        {"$ref": "#/$defs/file_hash"},
+        {"type": "object", "properties": {"filename": {"const": "vulnerability.attestation.sigstore.json"}}}
+      ]
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "lock",
+        "sbom",
+        "provenance",
+        "vulnerabilities",
+        "artifact_signature",
+        "build_evidence_attestation",
+        "sbom_attestation",
+        "provenance_attestation",
+        "vulnerability_attestation"
+      ],
+      "properties": {
+        "lock": {"$ref": "#/$defs/lock_file"},
+        "sbom": {"$ref": "#/$defs/sbom_file"},
+        "provenance": {"$ref": "#/$defs/provenance_file"},
+        "vulnerabilities": {"$ref": "#/$defs/vulnerability_file"},
+        "artifact_signature": {"$ref": "#/$defs/signature_file"},
+        "build_evidence_attestation": {"$ref": "#/$defs/build_evidence_attestation_file"},
+        "sbom_attestation": {"$ref": "#/$defs/sbom_attestation_file"},
+        "provenance_attestation": {"$ref": "#/$defs/provenance_attestation_file"},
+        "vulnerability_attestation": {"$ref": "#/$defs/vulnerability_attestation_file"}
+      }
+    }
+  }
+}

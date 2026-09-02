@@ -19,7 +19,7 @@
     "schema_version": {"const": 1},
     "intent_id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{7,127}$"},
     "policy_id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]{1,62}$"},
-    "signer_identity": {"const": "hermawan22"},
+    "signer_identity": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._@-]{1,127}$"},
     "issued_at": {"type": "string", "format": "date-time"},
     "expires_at": {"type": "string", "format": "date-time"},
     "source": {

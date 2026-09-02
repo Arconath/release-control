@@ -2,6 +2,8 @@
   "environments": {
     "source-handoff": {
       "protected_branches_only": true,
+      "prevent_self_review": true,
+      "required_reviewers": 2,
       "required_secrets": [
         "SOURCE_HANDOFF_AGE_IDENTITY"
       ],
@@ -9,11 +11,15 @@
     },
     "promotion": {
       "protected_branches_only": true,
+      "prevent_self_review": true,
+      "required_reviewers": 2,
       "required_secrets": [],
       "wait_timer_minutes": 0
     },
     "publication": {
       "protected_branches_only": true,
+      "prevent_self_review": true,
+      "required_reviewers": 2,
       "required_secrets": [
         "ARCONATH_REGISTRY_USERNAME",
         "ARCONATH_REGISTRY_PASSWORD",
@@ -22,21 +28,36 @@
       "wait_timer_minutes": 0
     }
   },
+  "release_governance": {
+    "enforce_on_release": true,
+    "minimum_distinct_release_signers": 2,
+    "minimum_environment_reviewers": 2,
+    "minimum_named_codeowners": 2,
+    "required_codeowner_patterns": [
+      "*",
+      "/.github/CODEOWNERS",
+      "/.github/workflows/",
+      "/bootstrap/",
+      "/contracts/",
+      "/policies/",
+      "/scripts/",
+      "/tests/"
+    ]
+  },
   "main_protection": {
     "allow_deletions": false,
     "allow_force_pushes": false,
     "dismiss_stale_reviews": true,
     "enforce_admins": true,
-    "linear_history": false,
-    "required_approvals": 0,
+    "linear_history": true,
+    "required_approvals": 2,
     "required_checks": [
       "contracts and workflow policy"
     ],
-    "require_code_owner_review": false,
-    "require_last_push_approval": false,
+    "require_code_owner_review": true,
+    "require_last_push_approval": true,
     "require_signed_commits": true,
-    "strict_checks": true,
-    "allowed_merge_methods": ["merge"]
+    "strict_checks": true
   },
   "repository": {
     "delete_branch_on_merge": true,

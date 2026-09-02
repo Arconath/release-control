@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import datetime as dt
+import base64
+import copy
 import hashlib
 import importlib.util
 import io
 import json
 import subprocess
+import sys
 import tarfile
 import tempfile
 import unittest
@@ -23,6 +26,29 @@ assert SPEC and SPEC.loader
 rc = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(rc)
 
+OCI_CONFIG = rc.canonical_bytes(
+    {
+        "architecture": "amd64",
+        "config": {},
+        "os": "linux",
+        "rootfs": {"diff_ids": [], "type": "layers"},
+    }
+)
+OCI_CONFIG_DIGEST = "sha256:" + hashlib.sha256(OCI_CONFIG).hexdigest()
+OCI_MANIFEST = rc.canonical_bytes(
+    {
+        "config": {
+            "digest": OCI_CONFIG_DIGEST,
+            "mediaType": "application/vnd.oci.image.config.v1+json",
+            "size": len(OCI_CONFIG),
+        },
+        "layers": [],
+        "mediaType": "application/vnd.oci.image.manifest.v1+json",
+        "schemaVersion": 2,
+    }
+)
+OCI_DIGEST = "sha256:" + hashlib.sha256(OCI_MANIFEST).hexdigest()
+
 
 def write_json(path: Path, value: object) -> None:
     path.write_bytes(rc.canonical_bytes(value))
@@ -35,39 +61,51 @@ class ReleaseControlTests(unittest.TestCase):
         self.policy_dir = self.root / "policies"
         self.policy_dir.mkdir()
         self.policy = {
-            "artifact_repository": "registry.arconath.internal/arconath/example-api",
+            "artifact_lock": {
+                "desired_state_path": "apps/releasepassport/desired-state.yaml",
+                "key": "releasepassport-api",
+                "proposal_only": True,
+                "repository": "Arconath/platform-apps",
+                "workloads": ["Deployment/releasepassport-api"],
+            },
+            "artifact_repository": "registry.arconath.internal/arconath/releasepassport/api",
             "build": {
                 "context": ".",
                 "dockerfile": "Dockerfile",
+                "identity_args": {
+                    "revision": ["REVISION"],
+                    "version": ["VERSION"],
+                },
                 "platform": "linux/amd64",
             },
             "enabled": True,
             "max_intent_age_seconds": 86400,
-            "policy_id": "example-api",
+            "policy_id": "releasepassport-api",
+            "product_id": "release-passport",
             "registry_host": "registry.arconath.internal",
             "schema_version": 1,
-            "source_repository": "Arconath/example",
+            "source_repository": "Arconath/releasepassport",
             "verification_commands": [["./scripts/verify.sh"]],
         }
-        write_json(self.policy_dir / "example-api.json", self.policy)
+        write_json(self.policy_dir / "releasepassport-api.json", self.policy)
         self.now = dt.datetime(2026, 8, 31, 0, 30, tzinfo=dt.timezone.utc)
         self.intent = {
             "artifact": {
-                "repository": "registry.arconath.internal/arconath/example-api",
+                "repository": "registry.arconath.internal/arconath/releasepassport/api",
                 "version": "1.2.3",
             },
             "expires_at": "2026-08-31T01:00:00Z",
-            "intent_id": "example-api-1.2.3",
+            "intent_id": "releasepassport-api-1.2.3",
             "issued_at": "2026-08-31T00:00:00Z",
-            "policy_id": "example-api",
+            "policy_id": "releasepassport-api",
             "rollback": {
                 "previous_digest": "sha256:" + "1" * 64,
                 "reason": "Restore the last verified production image.",
             },
             "schema_version": 1,
-            "signer_identity": "hermawan22",
+            "signer_identity": "release-operator",
             "source": {
-                "repository": "Arconath/example",
+                "repository": "Arconath/releasepassport",
                 "commit_sha": "2" * 40,
                 "tree_sha": "3" * 40,
             },
@@ -79,9 +117,17 @@ class ReleaseControlTests(unittest.TestCase):
             ["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", str(self.key)],
             check=True,
         )
+        self.second_key = self.root / "release-key-two"
+        subprocess.run(
+            ["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", str(self.second_key)],
+            check=True,
+        )
         public = (self.key.with_suffix(".pub")).read_text(encoding="utf-8").strip()
+        second_public = (self.second_key.with_suffix(".pub")).read_text(encoding="utf-8").strip()
         self.allowed = self.root / "allowed_signers"
-        self.allowed.write_text(f"hermawan22 {public}\n", encoding="utf-8")
+        self.allowed.write_text(
+            f"release-operator {public}\nsecond-operator {second_public}\n", encoding="utf-8"
+        )
         subprocess.run(
             [
                 "ssh-keygen",
@@ -101,8 +147,14 @@ class ReleaseControlTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.temp.cleanup()
 
-    def make_oci(self, digest: str | None = None) -> Path:
-        digest = digest or "sha256:" + "4" * 64
+    def make_oci(
+        self,
+        digest: str | None = None,
+        *,
+        include_manifest: bool = True,
+        corrupt_manifest: bool = False,
+    ) -> Path:
+        digest = digest or OCI_DIGEST
         index = rc.canonical_bytes(
             {
                 "schemaVersion": 2,
@@ -110,17 +162,118 @@ class ReleaseControlTests(unittest.TestCase):
                     {
                         "mediaType": "application/vnd.oci.image.manifest.v1+json",
                         "digest": digest,
-                        "size": 123,
+                        "size": len(OCI_MANIFEST),
                     }
                 ],
             }
         )
+        layout = rc.canonical_bytes({"imageLayoutVersion": "1.0.0"})
         archive = self.root / "candidate.oci.tar"
         with tarfile.open(archive, "w") as handle:
-            info = tarfile.TarInfo("index.json")
-            info.size = len(index)
-            handle.addfile(info, io.BytesIO(index))
+            for name, data in (
+                ("oci-layout", layout),
+                ("index.json", index),
+                (f"blobs/sha256/{OCI_CONFIG_DIGEST.removeprefix('sha256:')}", OCI_CONFIG),
+            ):
+                info = tarfile.TarInfo(name)
+                info.size = len(data)
+                handle.addfile(info, io.BytesIO(data))
+            if include_manifest:
+                manifest = (
+                    OCI_MANIFEST[:-1] + b" " if corrupt_manifest else OCI_MANIFEST
+                )
+                info = tarfile.TarInfo(
+                    f"blobs/sha256/{digest.removeprefix('sha256:')}"
+                )
+                info.size = len(manifest)
+                handle.addfile(info, io.BytesIO(manifest))
         return archive
+
+    def make_final_release(self) -> tuple[Path, dict, dict]:
+        archive = self.make_oci()
+        evidence_dir = self.root / "evidence"
+        evidence_dir.mkdir()
+        sbom = evidence_dir / "sbom.spdx.json"
+        write_json(sbom, {"packages": [], "spdxVersion": "SPDX-2.3"})
+        vulnerabilities = evidence_dir / "vulnerabilities.json"
+        write_json(vulnerabilities, {"descriptor": {}, "matches": []})
+        provenance = evidence_dir / "provenance.intoto.json"
+        write_json(provenance, rc.provenance_evidence(self.intent, archive, RELEASE_CONTROL_SHA))
+        build_path = evidence_dir / "build-evidence.json"
+        build_evidence = rc.build_evidence(self.intent, archive, RELEASE_CONTROL_SHA)
+        write_json(build_path, build_evidence)
+        lock_path = evidence_dir / "evidence-lock.json"
+        write_json(
+            lock_path,
+            rc.create_evidence_lock(
+                self.intent,
+                build_evidence,
+                build_path,
+                archive,
+                sbom,
+                provenance,
+                vulnerabilities,
+                RELEASE_CONTROL_SHA,
+            ),
+        )
+        base = rc.verify_published(
+            self.intent,
+            build_evidence,
+            archive,
+            OCI_DIGEST,
+            RELEASE_CONTROL_SHA,
+        )
+        for filename in (
+            "artifact.sigstore.json",
+            "build-evidence.attestation.sigstore.json",
+            "sbom.attestation.sigstore.json",
+            "provenance.attestation.sigstore.json",
+            "vulnerability.attestation.sigstore.json",
+        ):
+            write_json(evidence_dir / filename, {"bundle": filename})
+        record = rc.finalize_release(
+            self.intent,
+            base,
+            evidence_dir,
+            archive,
+            RELEASE_CONTROL_SHA,
+        )
+        write_json(evidence_dir / "release-record.json", record)
+        return archive, build_evidence, record
+
+    def make_verified_attestation(
+        self,
+        predicate: dict[str, object],
+        *,
+        predicate_type: str,
+        artifact_digest: str = OCI_DIGEST,
+    ) -> Path:
+        statement = {
+            "_type": "https://in-toto.io/Statement/v0.1",
+            "predicate": predicate,
+            "predicateType": predicate_type,
+            "subject": [
+                {
+                    "digest": {
+                        "sha256": artifact_digest.removeprefix("sha256:")
+                    },
+                    "name": self.intent["artifact"]["repository"],
+                }
+            ],
+        }
+        envelope = {
+            "payload": base64.b64encode(rc.canonical_bytes(statement)).decode("ascii"),
+            "payloadType": "application/vnd.in-toto+json",
+            "signatures": [
+                {
+                    "keyid": "",
+                    "sig": base64.b64encode(b"verified-by-cosign").decode("ascii"),
+                }
+            ],
+        }
+        path = self.root / "verified-attestation.json"
+        write_json(path, envelope)
+        return path
 
     def validate(self) -> tuple[dict, dict]:
         return rc.validate_intent(
@@ -137,20 +290,107 @@ class ReleaseControlTests(unittest.TestCase):
         self.assertEqual(intent["source"]["tree_sha"], "3" * 40)
         self.assertEqual(policy["artifact_repository"], intent["artifact"]["repository"])
 
-    def test_validate_signers_cli_accepts_one_operator_key(self) -> None:
-        result = subprocess.run(
-            [
-                "python3",
-                str(MODULE_PATH),
-                "validate-signers",
-                "--allowed-signers",
-                str(self.allowed),
-            ],
-            capture_output=True,
-            text=True,
-            check=False,
+    def test_build_evidence_binds_the_protected_release_control_sha(self) -> None:
+        archive = self.make_oci()
+        evidence = rc.build_evidence(self.intent, archive, RELEASE_CONTROL_SHA)
+        evidence["release_control_sha"] = "b" * 40
+        with self.assertRaisesRegex(rc.ContractError, "release-control SHA"):
+            rc.verify_published(
+                self.intent,
+                evidence,
+                archive,
+                OCI_DIGEST,
+                RELEASE_CONTROL_SHA,
+            )
+
+    def test_provenance_file_is_a_slsa_predicate_not_a_nested_statement(self) -> None:
+        predicate = rc.provenance_evidence(
+            self.intent,
+            self.make_oci(),
+            RELEASE_CONTROL_SHA,
         )
-        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(set(predicate), {"buildDefinition", "runDetails"})
+        self.assertNotIn("predicate", predicate)
+        self.assertEqual(
+            predicate["buildDefinition"]["internalParameters"]["release_control_sha"],
+            RELEASE_CONTROL_SHA,
+        )
+
+    def test_verified_attestation_must_contain_the_exact_local_predicate(self) -> None:
+        predicate = {"build": "exact", "schema_version": 1}
+        predicate_path = self.root / "predicate.json"
+        write_json(predicate_path, predicate)
+        envelope = self.make_verified_attestation(
+            predicate,
+            predicate_type="https://arconath.com/BuildEvidence/v1",
+        )
+        rc.verify_attestation_payload(
+            envelope,
+            predicate_path,
+            "https://arconath.com/BuildEvidence/v1",
+            self.intent["artifact"]["repository"],
+            OCI_DIGEST,
+        )
+
+        write_json(predicate_path, {"build": "tampered", "schema_version": 1})
+        with self.assertRaisesRegex(rc.ContractError, "predicate does not match"):
+            rc.verify_attestation_payload(
+                envelope,
+                predicate_path,
+                "https://arconath.com/BuildEvidence/v1",
+                self.intent["artifact"]["repository"],
+                OCI_DIGEST,
+            )
+
+    def test_verified_attestation_must_bind_the_exact_artifact_digest(self) -> None:
+        predicate = {"schema_version": 1}
+        predicate_path = self.root / "predicate.json"
+        write_json(predicate_path, predicate)
+        envelope = self.make_verified_attestation(
+            predicate,
+            predicate_type="https://arconath.com/BuildEvidence/v1",
+            artifact_digest="sha256:" + "f" * 64,
+        )
+        with self.assertRaisesRegex(rc.ContractError, "subject digest does not match"):
+            rc.verify_attestation_payload(
+                envelope,
+                predicate_path,
+                "https://arconath.com/BuildEvidence/v1",
+                self.intent["artifact"]["repository"],
+                OCI_DIGEST,
+            )
+
+    def test_verified_attestation_requires_a_nonempty_signature(self) -> None:
+        predicate = {"schema_version": 1}
+        predicate_path = self.root / "predicate.json"
+        write_json(predicate_path, predicate)
+        envelope_path = self.make_verified_attestation(
+            predicate,
+            predicate_type="https://arconath.com/BuildEvidence/v1",
+        )
+        envelope = json.loads(envelope_path.read_text(encoding="utf-8"))
+        envelope["signatures"] = []
+        write_json(envelope_path, envelope)
+
+        with self.assertRaisesRegex(rc.ContractError, "signature is missing"):
+            rc.verify_attestation_payload(
+                envelope_path,
+                predicate_path,
+                "https://arconath.com/BuildEvidence/v1",
+                self.intent["artifact"]["repository"],
+                OCI_DIGEST,
+            )
+
+        envelope["signatures"] = [{"sig": "not-base64"}]
+        write_json(envelope_path, envelope)
+        with self.assertRaisesRegex(rc.ContractError, "signature 0 is invalid"):
+            rc.verify_attestation_payload(
+                envelope_path,
+                predicate_path,
+                "https://arconath.com/BuildEvidence/v1",
+                self.intent["artifact"]["repository"],
+                OCI_DIGEST,
+            )
 
     def test_tampered_tree_is_rejected_by_signature(self) -> None:
         tampered = dict(self.intent)
@@ -179,24 +419,23 @@ class ReleaseControlTests(unittest.TestCase):
         with self.assertRaisesRegex(rc.ContractError, "unknown fields"):
             rc.validate_intent_value(value, self.policy, now=self.now)
 
-    def test_multiple_operator_keys_are_rejected_before_signature_verification(self) -> None:
-        extra = self.root / "multiple-operator-signers"
-        public = self.key.with_suffix(".pub").read_text(encoding="utf-8").strip()
-        extra.write_text(f"hermawan22 {public}\nhermawan22 {public}\n", encoding="utf-8")
-        with self.assertRaisesRegex(rc.ContractError, "exactly one named release operator key"):
+    def test_single_operator_key_is_rejected_before_signature_verification(self) -> None:
+        single = self.root / "single-operator-signers"
+        single.write_text(self.allowed.read_text(encoding="utf-8").splitlines()[0] + "\n", encoding="utf-8")
+        with self.assertRaisesRegex(rc.ContractError, "at least two distinct named operator keys"):
             rc.validate_intent(
                 self.intent_path,
                 self.signature,
-                extra,
+                single,
                 self.policy_dir,
                 self.now,
             )
 
-    def test_operator_aliases_are_rejected(self) -> None:
+    def test_two_operator_aliases_cannot_share_one_key(self) -> None:
         one_key = self.root / "aliased-operator-signers"
         public = self.key.with_suffix(".pub").read_text(encoding="utf-8").strip()
-        one_key.write_text(f"hermawan22,backup-operator {public}\n", encoding="utf-8")
-        with self.assertRaisesRegex(rc.ContractError, "exactly one hermawan22 identity"):
+        one_key.write_text(f"release-operator,second-operator {public}\n", encoding="utf-8")
+        with self.assertRaisesRegex(rc.ContractError, "at least two distinct named operator keys"):
             rc.validate_intent(
                 self.intent_path,
                 self.signature,
@@ -205,19 +444,111 @@ class ReleaseControlTests(unittest.TestCase):
                 self.now,
             )
 
-    def test_non_bootstrap_signer_identity_is_rejected(self) -> None:
-        value = dict(self.intent, signer_identity="other-operator")
-        with self.assertRaisesRegex(rc.ContractError, "configured release operator: hermawan22"):
-            rc.validate_intent_value(value, self.policy, now=self.now)
+    def test_release_governance_requires_two_named_codeowners(self) -> None:
+        codeowners = self.root / "CODEOWNERS"
+        settings = self.root / "repository-settings.json"
+        settings_value = json.loads(
+            (ROOT / "bootstrap/repository-settings.json").read_text(encoding="utf-8")
+        )
+        write_json(settings, settings_value)
+        patterns = settings_value["release_governance"]["required_codeowner_patterns"]
+        codeowners.write_text(
+            "".join(f"{pattern} @release-one\n" for pattern in patterns),
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(rc.ContractError, "two distinct named CODEOWNER"):
+            rc.validate_governance(codeowners, self.allowed, settings)
+
+        codeowners.write_text(
+            "".join(
+                f"{pattern} @release-one @release-two\n" for pattern in patterns
+            ),
+            encoding="utf-8",
+        )
+        readiness = rc.validate_governance(codeowners, self.allowed, settings)
+        self.assertEqual(readiness["named_codeowners"], 2)
+        self.assertEqual(readiness["protected_codeowner_rules_ready"], len(patterns))
+        self.assertEqual(readiness["release_signer_identities"], 2)
+        self.assertEqual(readiness["release_signer_keys"], 2)
+
+    def test_release_governance_requires_source_handoff_reviewers(self) -> None:
+        codeowners = self.root / "CODEOWNERS"
+        settings = self.root / "repository-settings.json"
+        settings_value = json.loads(
+            (ROOT / "bootstrap/repository-settings.json").read_text(encoding="utf-8")
+        )
+        settings_value["environments"]["source-handoff"]["required_reviewers"] = 1
+        write_json(settings, settings_value)
+        patterns = settings_value["release_governance"]["required_codeowner_patterns"]
+        codeowners.write_text(
+            "".join(f"{pattern} @release-one @release-two\n" for pattern in patterns),
+            encoding="utf-8",
+        )
+
+        with self.assertRaisesRegex(rc.ContractError, "source-handoff.required_reviewers"):
+            rc.validate_governance(codeowners, self.allowed, settings)
+
+    def test_release_governance_casefolds_codeowner_accounts(self) -> None:
+        codeowners = self.root / "CODEOWNERS"
+        settings = self.root / "repository-settings.json"
+        settings_value = json.loads(
+            (ROOT / "bootstrap/repository-settings.json").read_text(encoding="utf-8")
+        )
+        write_json(settings, settings_value)
+        patterns = settings_value["release_governance"]["required_codeowner_patterns"]
+        codeowners.write_text(
+            "".join(f"{pattern} @release-one @RELEASE-ONE\n" for pattern in patterns),
+            encoding="utf-8",
+        )
+
+        with self.assertRaisesRegex(rc.ContractError, "two distinct named CODEOWNER"):
+            rc.validate_governance(codeowners, self.allowed, settings)
+
+    def test_release_governance_requires_two_owners_on_every_protected_path(self) -> None:
+        codeowners = self.root / "CODEOWNERS"
+        settings = self.root / "repository-settings.json"
+        settings_value = json.loads(
+            (ROOT / "bootstrap/repository-settings.json").read_text(encoding="utf-8")
+        )
+        write_json(settings, settings_value)
+        patterns = settings_value["release_governance"]["required_codeowner_patterns"]
+        codeowners.write_text(
+            "".join(
+                f"{pattern} @release-one @release-two\n"
+                if pattern == "*"
+                else f"{pattern} @release-one\n"
+                for pattern in patterns
+            ),
+            encoding="utf-8",
+        )
+
+        with self.assertRaisesRegex(rc.ContractError, "protected CODEOWNERS rule"):
+            rc.validate_governance(codeowners, self.allowed, settings)
+
+    def test_release_governance_rejects_an_underprotected_narrow_rule(self) -> None:
+        codeowners = self.root / "CODEOWNERS"
+        settings = self.root / "repository-settings.json"
+        settings_value = json.loads(
+            (ROOT / "bootstrap/repository-settings.json").read_text(encoding="utf-8")
+        )
+        write_json(settings, settings_value)
+        patterns = settings_value["release_governance"]["required_codeowner_patterns"]
+        codeowners.write_text(
+            "".join(f"{pattern} @release-one @release-two\n" for pattern in patterns)
+            + "/.github/workflows/release.yml @release-one\n",
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(rc.ContractError, "every CODEOWNERS rule"):
+            rc.validate_governance(codeowners, self.allowed, settings)
 
     def test_noncanonical_registry_host_is_rejected(self) -> None:
         self.policy["registry_host"] = "registry.example.invalid"
-        self.policy["artifact_repository"] = "registry.example.invalid/arconath/example-api"
+        self.policy["artifact_repository"] = "registry.example.invalid/arconath/releasepassport-api"
         with self.assertRaisesRegex(rc.ContractError, "canonical internal Distribution host"):
             rc.validate_policy(self.policy)
 
     def test_artifact_outside_canonical_namespace_is_rejected(self) -> None:
-        self.policy["artifact_repository"] = "registry.arconath.internal/other/example-api"
+        self.policy["artifact_repository"] = "registry.arconath.internal/other/releasepassport-api"
         with self.assertRaisesRegex(rc.ContractError, "canonical arconath/ namespace"):
             rc.validate_policy(self.policy)
 
@@ -252,81 +583,340 @@ class ReleaseControlTests(unittest.TestCase):
         with self.assertRaisesRegex(rc.ContractError, "reserved"):
             rc.validate_policy(self.policy)
 
+    def test_policy_rejects_empty_identity_argument_contract(self) -> None:
+        self.policy["build"]["identity_args"] = {}
+        with self.assertRaisesRegex(rc.ContractError, "non-empty object"):
+            rc.validate_policy(self.policy)
+
+    def test_policy_rejects_oversized_build_argument_value(self) -> None:
+        self.policy["build"]["build_args"] = {"PROFILE": "x" * 513}
+        with self.assertRaisesRegex(rc.ContractError, "at most 512"):
+            rc.validate_policy(self.policy)
+
+    def test_enabled_policy_requires_canonical_product_binding(self) -> None:
+        self.policy.pop("product_id")
+        with self.assertRaisesRegex(rc.ContractError, "canonical product_id"):
+            rc.validate_policy(self.policy)
+
+    def test_policy_source_must_match_the_canonical_product_binding(self) -> None:
+        self.policy["product_id"] = "foundiqo"
+        with self.assertRaisesRegex(rc.ContractError, "does not match canonical product_id"):
+            rc.validate_policy(self.policy)
+
+    def test_policy_rejects_artifact_lock_binding_outside_canonical_product(self) -> None:
+        self.policy["artifact_lock"]["workloads"] = ["Deployment/not-releasepassport"]
+        with self.assertRaisesRegex(rc.ContractError, "artifact-lock binding"):
+            rc.validate_policy(self.policy)
+
+    def test_identity_build_arguments_come_from_signed_intent(self) -> None:
+        output = self.root / "github-output"
+        rc.emit_outputs(output, self.intent, rc.validate_policy(self.policy))
+        values = dict(
+            line.split("=", 1)
+            for line in output.read_text(encoding="utf-8").splitlines()
+        )
+        self.assertEqual(
+            json.loads(values["identity-build-args-json"]),
+            {"REVISION": "2" * 40, "VERSION": "1.2.3"},
+        )
+
+    def test_artifact_lock_proposal_is_exact_and_never_mutates_gitops(self) -> None:
+        _, _, record = self.make_final_release()
+        proposal = rc.artifact_lock_proposal(
+            self.intent,
+            self.policy,
+            record,
+            expected_digest=OCI_DIGEST,
+            release_control_sha=RELEASE_CONTROL_SHA,
+            evidence_dir=self.root / "evidence",
+        )
+        self.assertTrue(proposal["proposal_only"])
+        self.assertFalse(proposal["deployment_eligibility"])
+        self.assertEqual(
+            proposal["target"],
+            {
+                "artifact_lock_key": "releasepassport-api",
+                "desired_state_path": "apps/releasepassport/desired-state.yaml",
+                "product_id": "release-passport",
+                "repository": "Arconath/platform-apps",
+                "workloads": ["Deployment/releasepassport-api"],
+            },
+        )
+        self.assertEqual(proposal["release"]["artifact"]["digest"], OCI_DIGEST)
+        self.assertEqual(
+            proposal["rollback"]["digest"], "sha256:" + "1" * 64
+        )
+
+    def test_artifact_lock_proposal_rejects_platform_policy(self) -> None:
+        platform_policy = copy.deepcopy(self.policy)
+        platform_policy.pop("product_id")
+        platform_policy.pop("artifact_lock")
+        platform_policy["policy_id"] = "platform-keycloak"
+        platform_policy["source_repository"] = "Arconath/platform-components"
+        platform_policy["artifact_repository"] = (
+            "registry.arconath.internal/arconath/platform-keycloak"
+        )
+
+        with self.assertRaisesRegex(rc.ContractError, "canonical product policy"):
+            rc.artifact_lock_proposal(
+                self.intent,
+                platform_policy,
+                {},
+                evidence_dir=self.root / "evidence",
+            )
+
+    def test_canonical_product_snapshot_contains_exactly_the_portfolio_products(self) -> None:
+        self.assertEqual(
+            set(rc.CANONICAL_PRODUCTS),
+            {
+                "release-passport",
+                "foundiqo",
+                "opportunity-radar",
+                "boringkit",
+                "abra",
+                "aeliqo",
+                "spatial-studio",
+                "efficient-ai-compute",
+                "people-passport",
+                "agentdeck",
+                "syviora",
+            },
+        )
+        self.assertEqual(
+            rc.CANONICAL_PRODUCTS["opportunity-radar"][0], "Arconath/loklyo"
+        )
+        self.assertEqual(
+            rc.CANONICAL_PRODUCTS["spatial-studio"][0], "Arconath/spatial"
+        )
+
+    def test_product_validation_runs_in_a_disposable_copy(self) -> None:
+        source = self.root / "product"
+        source.mkdir()
+        (source / "input.txt").write_text("source", encoding="utf-8")
+        policy = dict(self.policy)
+        policy["verification_commands"] = [
+            [
+                sys.executable,
+                "-c",
+                "from pathlib import Path; Path('validation-output').write_text('ok')",
+            ]
+        ]
+        rc.run_policy(policy, source)
+        self.assertFalse((source / "validation-output").exists())
+
+    def test_product_validation_rejects_mutation_of_the_original_source(self) -> None:
+        source = self.root / "product"
+        source.mkdir()
+        changed = source / "changed.txt"
+        policy = dict(self.policy)
+        policy["verification_commands"] = [
+            [
+                sys.executable,
+                "-c",
+                f"from pathlib import Path; Path({str(changed)!r}).write_text('changed')",
+            ]
+        ]
+        with self.assertRaisesRegex(rc.ContractError, "must be read-only"):
+            rc.run_policy(policy, source)
+
+    def test_product_validation_rejects_source_symlinks(self) -> None:
+        source = self.root / "product"
+        source.mkdir()
+        (source / "input.txt").write_text("source", encoding="utf-8")
+        (source / "link").symlink_to(source / "input.txt")
+        with self.assertRaisesRegex(rc.ContractError, "unsupported symlink"):
+            rc.run_policy(self.policy, source)
+
+    def test_zero_oci_digest_is_rejected(self) -> None:
+        with self.assertRaisesRegex(rc.ContractError, "OCI image manifest descriptor digest"):
+            rc.build_evidence(self.intent, self.make_oci(rc.ZERO_DIGEST), RELEASE_CONTROL_SHA)
+
+    def test_oci_manifest_blob_must_exist(self) -> None:
+        with self.assertRaisesRegex(rc.ContractError, "referenced OCI blob is missing"):
+            rc.build_evidence(
+                self.intent,
+                self.make_oci(include_manifest=False),
+                RELEASE_CONTROL_SHA,
+            )
+
+    def test_oci_manifest_blob_must_match_its_descriptor_digest(self) -> None:
+        with self.assertRaisesRegex(rc.ContractError, "OCI blob digest mismatch"):
+            rc.build_evidence(
+                self.intent,
+                self.make_oci(corrupt_manifest=True),
+                RELEASE_CONTROL_SHA,
+            )
+
+    def test_zero_evidence_hash_is_rejected(self) -> None:
+        with self.assertRaisesRegex(rc.ContractError, "evidence SHA-256"):
+            rc.validate_file_hash(
+                {"filename": "sbom.spdx.json", "sha256": "0" * 64},
+                "sbom",
+            )
+
     def test_disabled_policy_fails_closed(self) -> None:
         self.policy["enabled"] = False
-        write_json(self.policy_dir / "example-api.json", self.policy)
+        write_json(self.policy_dir / "releasepassport-api.json", self.policy)
         with self.assertRaisesRegex(rc.ContractError, "disabled"):
             self.validate()
 
     def test_exact_artifact_digest_survives_transport_and_publication(self) -> None:
-        archive = self.make_oci()
-        evidence = rc.build_evidence(self.intent, archive)
-        record = rc.verify_published(
-            self.intent, evidence, archive, "sha256:" + "4" * 64, RELEASE_CONTROL_SHA
-        )
+        archive, evidence, record = self.make_final_release()
         self.assertEqual(record["artifact"]["digest"], evidence["artifact"]["digest"])
         self.assertEqual(record["release_control_sha"], RELEASE_CONTROL_SHA)
         self.assertEqual(
             record["artifact"]["reference"],
-            "registry.arconath.internal/arconath/example-api@sha256:" + "4" * 64,
+            "registry.arconath.internal/arconath/releasepassport/api@" + OCI_DIGEST,
         )
 
-    def test_slsa_provenance_binds_source_artifact_and_control_revision(self) -> None:
+    def test_evidence_lock_binds_sbom_provenance_and_vulnerability_report(self) -> None:
+        _, _, record = self.make_final_release()
+        sbom = self.root / "evidence/sbom.spdx.json"
+        sbom.write_text('{"packages":[],"spdxVersion":"SPDX-2.3","tampered":true}\n', encoding="utf-8")
+        with self.assertRaisesRegex(rc.ContractError, "sbom evidence SHA-256 differs"):
+            rc.validate_release_bundle_files(
+                self.intent,
+                record,
+                self.root / "evidence",
+                RELEASE_CONTROL_SHA,
+            )
+
+    def test_release_record_requires_signature_and_attestation_evidence(self) -> None:
         archive = self.make_oci()
-        evidence = rc.build_evidence(self.intent, archive)
-        provenance = rc.build_provenance(self.intent, evidence, RELEASE_CONTROL_SHA)
-        rc.validate_provenance(provenance, self.intent, evidence, RELEASE_CONTROL_SHA)
-        self.assertEqual(provenance["subject"][0]["digest"]["sha256"], "4" * 64)
-        self.assertEqual(
-            provenance["predicate"]["buildDefinition"]["internalParameters"]["release_control_sha"],
+        evidence = rc.build_evidence(self.intent, archive, RELEASE_CONTROL_SHA)
+        base = rc.verify_published(
+            self.intent,
+            evidence,
+            archive,
+            OCI_DIGEST,
             RELEASE_CONTROL_SHA,
         )
+        evidence_dir = self.root / "incomplete-evidence"
+        evidence_dir.mkdir()
+        with self.assertRaisesRegex(rc.ContractError, "cannot load JSON"):
+            rc.finalize_release(
+                self.intent,
+                base,
+                evidence_dir,
+                archive,
+                RELEASE_CONTROL_SHA,
+            )
 
-        tampered = json.loads(json.dumps(provenance))
-        tampered["predicate"]["buildDefinition"]["externalParameters"]["source_tree"] = "5" * 40
-        with self.assertRaisesRegex(rc.ContractError, "external parameters"):
-            rc.validate_provenance(tampered, self.intent, evidence, RELEASE_CONTROL_SHA)
+    def test_promotion_and_rollback_reject_unknown_evidence_fields(self) -> None:
+        _, _, record = self.make_final_release()
+        record["evidence"]["unexpected"] = {"filename": "x", "sha256": "0" * 64}
+        with self.assertRaisesRegex(rc.ContractError, "unknown fields"):
+            rc.release_manifests(self.intent, record, evidence_dir=self.root / "evidence")
+
+    def test_cli_verifies_the_final_evidence_bundle_before_manifest_emission(self) -> None:
+        _, _, record = self.make_final_release()
+        evidence_dir = self.root / "evidence"
+
+        def run(*arguments: str) -> subprocess.CompletedProcess[str]:
+            return subprocess.run(
+                [sys.executable, str(MODULE_PATH), *arguments],
+                cwd=ROOT,
+                check=False,
+                text=True,
+                capture_output=True,
+            )
+
+        result = run(
+            "verify-evidence-lock",
+            "--intent",
+            str(self.intent_path),
+            "--lock",
+            str(evidence_dir / "evidence-lock.json"),
+            "--build-evidence",
+            str(evidence_dir / "build-evidence.json"),
+            "--archive",
+            str(self.root / "candidate.oci.tar"),
+            "--evidence-dir",
+            str(evidence_dir),
+            "--release-control-sha",
+            RELEASE_CONTROL_SHA,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+        promotion = self.root / "promotion-manifest.json"
+        rollback = self.root / "rollback-manifest.json"
+        artifact_lock_proposal = self.root / "artifact-lock-proposal.json"
+        result = run(
+            "emit-manifests",
+            "--intent",
+            str(self.intent_path),
+            "--release-record",
+            str(evidence_dir / "release-record.json"),
+            "--policy",
+            str(self.policy_dir / "releasepassport-api.json"),
+            "--promotion",
+            str(promotion),
+            "--rollback",
+            str(rollback),
+            "--artifact-lock-proposal",
+            str(artifact_lock_proposal),
+            "--expected-digest",
+            OCI_DIGEST,
+            "--release-control-sha",
+            RELEASE_CONTROL_SHA,
+            "--evidence-dir",
+            str(evidence_dir),
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(promotion.read_text())["artifact"], record["artifact"])
+        self.assertEqual(json.loads(rollback.read_text())["evidence"], record["evidence"])
+        self.assertEqual(
+            json.loads(artifact_lock_proposal.read_text())["release"]["artifact"],
+            record["artifact"],
+        )
 
     def test_changed_archive_is_rejected(self) -> None:
-        archive = self.make_oci()
-        evidence = rc.build_evidence(self.intent, archive)
+        archive, evidence, _ = self.make_final_release()
         with archive.open("ab") as handle:
             handle.write(b"tamper")
         with self.assertRaisesRegex(rc.ContractError, "archive SHA-256 differs"):
-            rc.verify_published(self.intent, evidence, archive, "sha256:" + "4" * 64, RELEASE_CONTROL_SHA)
+            rc.verify_evidence_lock(
+                json.loads((self.root / "evidence/evidence-lock.json").read_text()),
+                self.intent,
+                release_control_sha=RELEASE_CONTROL_SHA,
+                build_evidence_path=self.root / "evidence/build-evidence.json",
+                archive=archive,
+                evidence_dir=self.root / "evidence",
+            )
 
     def test_published_digest_mismatch_is_rejected(self) -> None:
-        archive = self.make_oci()
-        evidence = rc.build_evidence(self.intent, archive)
+        archive, evidence, _ = self.make_final_release()
         with self.assertRaisesRegex(rc.ContractError, "published digest differs"):
             rc.verify_published(self.intent, evidence, archive, "sha256:" + "5" * 64, RELEASE_CONTROL_SHA)
 
     def test_promotion_and_rollback_are_bound_to_exact_digest(self) -> None:
-        archive = self.make_oci()
-        evidence = rc.build_evidence(self.intent, archive)
-        record = rc.verify_published(self.intent, evidence, archive, "sha256:" + "4" * 64, RELEASE_CONTROL_SHA)
-        promotion, rollback = rc.release_manifests(self.intent, record)
-        self.assertEqual(promotion["artifact"]["digest"], "sha256:" + "4" * 64)
+        archive, _, record = self.make_final_release()
+        promotion, rollback = rc.release_manifests(
+            self.intent, record, evidence_dir=self.root / "evidence"
+        )
+        self.assertEqual(promotion["artifact"]["digest"], OCI_DIGEST)
         self.assertEqual(promotion["rollback_digest"], "sha256:" + "1" * 64)
+        self.assertEqual(promotion["evidence"], record["evidence"])
         self.assertEqual(promotion["release_control_sha"], RELEASE_CONTROL_SHA)
-        self.assertEqual(rollback["replace_digest"], "sha256:" + "4" * 64)
+        self.assertEqual(rollback["replace_digest"], OCI_DIGEST)
         self.assertEqual(rollback["restore_digest"], "sha256:" + "1" * 64)
         self.assertEqual(rollback["release_control_sha"], RELEASE_CONTROL_SHA)
 
     def test_rollback_must_not_point_to_new_release(self) -> None:
-        archive = self.make_oci()
-        evidence = rc.build_evidence(self.intent, archive)
-        record = rc.verify_published(self.intent, evidence, archive, "sha256:" + "4" * 64, RELEASE_CONTROL_SHA)
-        self.intent["rollback"]["previous_digest"] = "sha256:" + "4" * 64
+        _, _, record = self.make_final_release()
+        self.intent["rollback"]["previous_digest"] = OCI_DIGEST
         with self.assertRaisesRegex(rc.ContractError, "must differ"):
-            rc.release_manifests(self.intent, record)
+            rc.release_manifests(self.intent, record, evidence_dir=self.root / "evidence")
 
     def test_promotion_rejects_digest_different_from_publish_job(self) -> None:
-        archive = self.make_oci()
-        evidence = rc.build_evidence(self.intent, archive)
-        record = rc.verify_published(self.intent, evidence, archive, "sha256:" + "4" * 64, RELEASE_CONTROL_SHA)
+        _, _, record = self.make_final_release()
         with self.assertRaisesRegex(rc.ContractError, "publish job output"):
-            rc.release_manifests(self.intent, record, "sha256:" + "5" * 64)
+            rc.release_manifests(
+                self.intent,
+                record,
+                "sha256:" + "5" * 64,
+                evidence_dir=self.root / "evidence",
+            )
 
     def test_source_handoff_is_canonical_and_binds_ciphertext_and_run(self) -> None:
         plaintext = self.root / "product.tar"

@@ -1,4 +1,8 @@
 * @hermawan22
+/.github/CODEOWNERS @hermawan22
 /.github/workflows/ @hermawan22
+/bootstrap/ @hermawan22
+/contracts/ @hermawan22
 /policies/ @hermawan22
 /scripts/ @hermawan22
+/tests/ @hermawan22

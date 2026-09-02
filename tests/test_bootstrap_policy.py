@@ -24,14 +24,30 @@ class BootstrapPolicyTests(unittest.TestCase):
         self.assertTrue(protection["enforce_admins"])
         self.assertTrue(protection["strict_checks"])
         self.assertTrue(protection["require_signed_commits"])
-        self.assertFalse(protection["require_code_owner_review"])
-        self.assertFalse(protection["require_last_push_approval"])
-        self.assertEqual(protection["required_approvals"], 0)
-        self.assertFalse(protection["linear_history"])
-        self.assertEqual(protection["allowed_merge_methods"], ["merge"])
+        self.assertTrue(protection["require_code_owner_review"])
+        self.assertTrue(protection["require_last_push_approval"])
+        self.assertEqual(protection["required_approvals"], 2)
         self.assertFalse(protection["allow_force_pushes"])
         self.assertFalse(protection["allow_deletions"])
         self.assertEqual(protection["required_checks"], ["contracts and workflow policy"])
+        governance = self.settings["release_governance"]
+        self.assertEqual(governance["minimum_named_codeowners"], 2)
+        self.assertEqual(governance["minimum_distinct_release_signers"], 2)
+        self.assertEqual(governance["minimum_environment_reviewers"], 2)
+        self.assertEqual(
+            governance["required_codeowner_patterns"],
+            [
+                "*",
+                "/.github/CODEOWNERS",
+                "/.github/workflows/",
+                "/bootstrap/",
+                "/contracts/",
+                "/policies/",
+                "/scripts/",
+                "/tests/",
+            ],
+        )
+        self.assertTrue(governance["enforce_on_release"])
 
     def test_release_environments_are_branch_restricted_and_credential_scoped(self) -> None:
         environments = self.settings["environments"]
@@ -42,6 +58,8 @@ class BootstrapPolicyTests(unittest.TestCase):
             with self.subTest(environment=name):
                 self.assertTrue(environment["protected_branches_only"])
                 self.assertEqual(environment["wait_timer_minutes"], 0)
+                self.assertEqual(environment["required_reviewers"], 2)
+                self.assertTrue(environment["prevent_self_review"])
 
         self.assertEqual(
             environments["source-handoff"]["required_secrets"],
@@ -86,6 +104,166 @@ class BootstrapPolicyTests(unittest.TestCase):
             self.assertEqual(value["source_repository"], "Arconath/platform-components")
             self.assertEqual(value["registry_host"], "registry.arconath.internal")
             self.assertTrue(value["build"]["build_args"])
+
+    def test_all_canonical_product_artifact_policies_are_present_but_disabled(self) -> None:
+        policy_dir = ROOT / "policies" / "products"
+        policies = []
+        for path in sorted(policy_dir.glob("*.json.disabled")):
+            value = json.loads(path.read_text(encoding="utf-8"))
+            if "product_id" in value:
+                policies.append(value)
+        self.assertEqual(len(policies), 27)
+        self.assertEqual(
+            {value["product_id"] for value in policies},
+            {
+                "release-passport",
+                "foundiqo",
+                "opportunity-radar",
+                "boringkit",
+                "abra",
+                "aeliqo",
+                "spatial-studio",
+                "efficient-ai-compute",
+                "people-passport",
+                "agentdeck",
+                "syviora",
+            },
+        )
+        self.assertTrue(all(value["enabled"] is False for value in policies))
+        self.assertTrue(all(value["artifact_lock"]["proposal_only"] is True for value in policies))
+
+    def test_release_contract_schemas_are_strict_json_documents(self) -> None:
+        expected = {
+            "artifact-lock-proposal.schema.json",
+            "build-evidence.schema.json",
+            "evidence-lock.schema.json",
+            "product-policy.schema.json",
+            "promotion-manifest.schema.json",
+            "provenance.schema.json",
+            "release-intent.schema.json",
+            "release-record.schema.json",
+            "rollback-manifest.schema.json",
+            "source-handoff.schema.json",
+        }
+        contract_dir = ROOT / "contracts"
+        self.assertEqual({path.name for path in contract_dir.glob("*.json")}, expected)
+        for path in sorted(contract_dir.glob("*.json")):
+            with self.subTest(schema=path.name):
+                value = json.loads(path.read_text(encoding="utf-8"))
+                self.assertEqual(value["type"], "object")
+                self.assertFalse(value["additionalProperties"])
+                self.assertTrue(value["required"])
+                self.assertTrue(value.get("$id", "").startswith("https://release-control.arconath.com/contracts/"))
+
+    def test_schema_object_keywords_are_strictly_typed_and_self_contained(self) -> None:
+        """Keep every object sub-schema compatible with strict Draft 2020-12 tools."""
+
+        def visit(value: object, location: str) -> None:
+            if isinstance(value, dict):
+                if "properties" in value:
+                    self.assertEqual(value.get("type"), "object", location)
+                if "required" in value:
+                    self.assertEqual(value.get("type"), "object", location)
+                    properties = value.get("properties", {})
+                    self.assertIsInstance(properties, dict, location)
+                    self.assertTrue(
+                        set(value["required"]).issubset(properties),
+                        f"{location}: required keys must be declared locally",
+                    )
+                for key, child in value.items():
+                    visit(child, f"{location}/{key}")
+            elif isinstance(value, list):
+                for index, child in enumerate(value):
+                    visit(child, f"{location}/{index}")
+
+        for path in sorted((ROOT / "contracts").glob("*.json")):
+            with self.subTest(schema=path.name):
+                visit(json.loads(path.read_text(encoding="utf-8")), path.name)
+
+    def test_release_evidence_schemas_require_every_signed_bundle(self) -> None:
+        expected = {
+            "lock",
+            "sbom",
+            "provenance",
+            "vulnerabilities",
+            "artifact_signature",
+            "build_evidence_attestation",
+            "sbom_attestation",
+            "provenance_attestation",
+            "vulnerability_attestation",
+        }
+        for filename in (
+            "release-record.schema.json",
+            "promotion-manifest.schema.json",
+            "rollback-manifest.schema.json",
+        ):
+            value = json.loads((ROOT / "contracts" / filename).read_text(encoding="utf-8"))
+            evidence = value["$defs"]["evidence"]
+            self.assertEqual(set(evidence["required"]), expected, filename)
+            self.assertEqual(set(evidence["properties"]), expected, filename)
+
+    def test_artifact_lock_proposal_schema_pins_canonical_evidence_filenames(self) -> None:
+        expected = {
+            "lock": "evidence-lock.json",
+            "sbom": "sbom.spdx.json",
+            "provenance": "provenance.intoto.json",
+            "vulnerabilities": "vulnerabilities.json",
+            "artifact_signature": "artifact.sigstore.json",
+            "build_evidence_attestation": "build-evidence.attestation.sigstore.json",
+            "sbom_attestation": "sbom.attestation.sigstore.json",
+            "provenance_attestation": "provenance.attestation.sigstore.json",
+            "vulnerability_attestation": "vulnerability.attestation.sigstore.json",
+        }
+        schema = json.loads(
+            (ROOT / "contracts/artifact-lock-proposal.schema.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        properties = schema["$defs"]["evidence"]["properties"]
+        for key, filename in expected.items():
+            with self.subTest(evidence=key):
+                self.assertEqual(
+                    properties[key]["allOf"][1]["properties"]["filename"]["const"],
+                    filename,
+                )
+
+    def test_artifact_lock_proposal_schema_is_closed_world_and_product_only(self) -> None:
+        schema = json.loads(
+            (ROOT / "contracts/artifact-lock-proposal.schema.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        product_policies = [
+            json.loads(path.read_text(encoding="utf-8"))
+            for path in sorted((ROOT / "policies/products").glob("*.json.disabled"))
+            if "product_id" in json.loads(path.read_text(encoding="utf-8"))
+        ]
+        target = schema["properties"]["target"]["properties"]
+        self.assertEqual(
+            set(schema["properties"]["policy_id"]["enum"]),
+            {value["policy_id"] for value in product_policies},
+        )
+        self.assertEqual(
+            set(target["product_id"]["enum"]),
+            {value["product_id"] for value in product_policies},
+        )
+        self.assertEqual(
+            set(target["artifact_lock_key"]["enum"]),
+            {value["artifact_lock"]["key"] for value in product_policies},
+        )
+        self.assertEqual(
+            set(target["desired_state_path"]["enum"]),
+            {value["artifact_lock"]["desired_state_path"] for value in product_policies},
+        )
+        self.assertEqual(
+            set(schema["$defs"]["source"]["properties"]["repository"]["enum"]),
+            {value["source_repository"] for value in product_policies},
+        )
+        self.assertEqual(
+            set(schema["$defs"]["artifact"]["properties"]["repository"]["enum"]),
+            {value["artifact_repository"] for value in product_policies},
+        )
+        self.assertNotIn("platform-keycloak", schema["properties"]["policy_id"]["enum"])
 
 
 if __name__ == "__main__":

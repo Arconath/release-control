@@ -15,7 +15,7 @@ concurrency:
 jobs:
   validate:
     name: contracts and workflow policy
-    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+    if: ${{ github.repository == 'Arconath/release-control' && (github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == 'Arconath/release-control' && github.event.pull_request.base.ref == 'main')) }}
     runs-on:
       group: arconath-jit
       labels: [self-hosted, linux, x64, arconath-jit, rootless-buildkit]
@@ -27,4 +27,27 @@ jobs:
           persist-credentials: false
 
       - name: Verify contracts and workflow policy
-        run: ./scripts/verify.sh
+        shell: bash
+        env:
+          PR_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+        run: |
+          set -Eeuo pipefail
+          [[ "$GITHUB_REPOSITORY" == "Arconath/release-control" ]]
+          [[ "$GITHUB_EVENT_NAME" == "pull_request" || "$GITHUB_EVENT_NAME" == "push" ]]
+          if [[ "$GITHUB_EVENT_NAME" == "pull_request" ]]; then
+            [[ "$PR_HEAD_REPOSITORY" == "Arconath/release-control" ]]
+            [[ "${{ github.event.pull_request.base.ref }}" == "main" ]]
+          else
+            [[ "$GITHUB_REF" == "refs/heads/main" ]]
+          fi
+          [[ "${RUNNER_ENVIRONMENT:-}" == "self-hosted" ]] || {
+            printf 'Validation requires the private self-hosted runner group.\n' >&2
+            exit 1
+          }
+          [[ "$(id -u)" != 0 ]]
+          test ! -e /var/run/docker.sock
+          test ! -L /var/run/docker.sock
+          test ! -e "/run/user/$(id -u)/docker.sock"
+          test ! -L "/run/user/$(id -u)/docker.sock"
+          [[ -z "${DOCKER_HOST:-}" && -z "${CONTAINER_HOST:-}" && -z "${PODMAN_HOST:-}" ]]
+          ./scripts/verify.sh

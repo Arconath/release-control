@@ -10,11 +10,15 @@ command -v actionlint >/dev/null
 actionlint
 command -v shellcheck >/dev/null
 shellcheck scripts/*.sh
-command -v jq >/dev/null
-for schema in contracts/*.json; do
-  jq empty "$schema"
-done
 git diff --check
+
+python3 scripts/release_control.py validate-policy-set \
+  --policy-dir policies/products
+python3 scripts/release_control.py validate-governance \
+  --codeowners .github/CODEOWNERS \
+  --allowed-signers policies/release-signers \
+  --settings bootstrap/repository-settings.json \
+  --allow-incomplete
 
 while IFS= read -r policy; do
   python3 scripts/release_control.py validate-policy \
