@@ -91,6 +91,7 @@ jobs:
     name: Fetch exact source
     needs: validate-intent
     if: ${{ github.repository == 'Arconath/release-control' && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' }}
+    environment: source-handoff
     runs-on:
       group: arconath-jit
       labels: [self-hosted, linux, x64, arconath-jit, rootless-buildkit]

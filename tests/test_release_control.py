@@ -576,6 +576,55 @@ class ReleaseControlTests(unittest.TestCase):
         self.assertNotEqual(strict.returncode, 0)
         self.assertIn("merge-readiness is blocked", strict.stderr)
 
+    def test_readiness_diagnostics_enumerate_source_reader_secret_without_value(self) -> None:
+        readiness = rc.validate_governance(
+            ROOT / ".github/CODEOWNERS",
+            ROOT / "policies/release-signers",
+            ROOT / "bootstrap/repository-settings.json",
+            require_ready=False,
+        )
+        self.assertEqual(
+            readiness["runtime_prerequisites"]["repository_secrets"],
+            ["SOURCE_READER_PRIVATE_KEY"],
+        )
+        self.assertNotIn("BEGIN", json.dumps(readiness["runtime_prerequisites"]))
+
+    def test_merge_readiness_cli_has_permissive_diagnostic_and_strict_mode(self) -> None:
+        command = [
+            "python3",
+            str(MODULE_PATH),
+            "merge-readiness",
+            "--codeowners",
+            str(ROOT / ".github/CODEOWNERS"),
+            "--allowed-signers",
+            str(ROOT / "policies/release-signers"),
+            "--settings",
+            str(ROOT / "bootstrap/repository-settings.json"),
+            "--policy-dir",
+            str(ROOT / "policies/products"),
+            "--contract-dir",
+            str(ROOT / "contracts"),
+            "--workflow-dir",
+            str(ROOT / ".github/workflows"),
+        ]
+        diagnostic = subprocess.run(command, capture_output=True, text=True, check=False)
+        self.assertEqual(diagnostic.returncode, 0, diagnostic.stderr)
+        value = json.loads(diagnostic.stdout)
+        self.assertFalse(value["merge_ready"])
+        self.assertIn(
+            "SOURCE_READER_PRIVATE_KEY",
+            value["external_prerequisites"]["repository_secrets"],
+        )
+
+        strict = subprocess.run(
+            [*command, "--require-ready"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertNotEqual(strict.returncode, 0)
+        self.assertIn("merge-readiness is blocked", strict.stderr)
+
     def test_release_governance_requires_source_handoff_reviewers(self) -> None:
         codeowners = self.root / "CODEOWNERS"
         settings = self.root / "repository-settings.json"

@@ -305,6 +305,22 @@ RELEASE_EVIDENCE_KEYS = (
     "provenance_attestation",
     "vulnerability_attestation",
 )
+REQUIRED_REPOSITORY_VARIABLES = {
+    "ARCONATH_REGISTRY_HOST": CANONICAL_REGISTRY_HOST,
+    "CANDIDATE_HANDOFF_AGE_RECIPIENT": "set-after-candidate-handoff-key-is-created",
+    "SOURCE_HANDOFF_AGE_RECIPIENT": "set-after-source-handoff-key-is-created",
+    "SOURCE_READER_APP_ID": "set-after-source-reader-app-is-created",
+}
+REQUIRED_REPOSITORY_SECRETS = ("SOURCE_READER_PRIVATE_KEY",)
+REQUIRED_ENVIRONMENT_SECRETS = {
+    "source-handoff": ["SOURCE_HANDOFF_AGE_IDENTITY"],
+    "publication": [
+        "ARCONATH_REGISTRY_USERNAME",
+        "ARCONATH_REGISTRY_PASSWORD",
+        "CANDIDATE_HANDOFF_AGE_IDENTITY",
+    ],
+    "promotion": [],
+}
 EXPECTED_CONTRACT_FILES = frozenset(
     {
         "artifact-lock-proposal.schema.json",
@@ -1030,7 +1046,27 @@ def merge_readiness(
         "checked_in_contract_ready": not unique_blockers,
         "blocking_reasons": unique_blockers,
         "live_github_configuration": "unverified",
-        "external_blockers": ["GITHUB_CONFIGURATION_UNVERIFIED"],
+        "external_blockers": [
+            "GITHUB_CONFIGURATION_UNVERIFIED",
+            "ARCONATH_REGISTRY_HOST_UNVERIFIED",
+            "ARCONATH_REGISTRY_CREDENTIALS_UNVERIFIED",
+            "SOURCE_HANDOFF_CONFIGURATION_UNVERIFIED",
+            "CANDIDATE_HANDOFF_CONFIGURATION_UNVERIFIED",
+            "SOURCE_READER_CONFIGURATION_UNVERIFIED",
+        ],
+        "external_prerequisites": {
+            "status": "unverified",
+            "repository_variables": sorted(REQUIRED_REPOSITORY_VARIABLES),
+            "repository_secrets": list(REQUIRED_REPOSITORY_SECRETS),
+            "environment_secrets": {
+                name: values for name, values in REQUIRED_ENVIRONMENT_SECRETS.items()
+            },
+            "action": (
+                "Configure the listed GitHub variables, repository secret, and "
+                "protected-environment secrets; keep their values out of the "
+                "repository, then verify live GitHub configuration separately."
+            ),
+        },
         "checks": checks,
     }
 
@@ -1220,6 +1256,51 @@ def named_codeowners(codeowners: Path) -> set[str]:
     return set().union(*codeowner_rule_inventory(codeowners).values())
 
 
+def validate_runtime_configuration_contract(settings: dict[str, Any]) -> dict[str, Any]:
+    """Validate checked-in names for credentials kept in GitHub settings."""
+
+    variables = settings.get("required_repository_variables")
+    if not isinstance(variables, dict):
+        die("repository settings are missing required_repository_variables")
+    strict_keys(
+        variables,
+        set(REQUIRED_REPOSITORY_VARIABLES),
+        "required_repository_variables",
+    )
+    for name, expected in REQUIRED_REPOSITORY_VARIABLES.items():
+        if variables.get(name) != expected:
+            die(
+                "required_repository_variables."
+                f"{name} must remain the reviewed canonical marker"
+            )
+
+    environments = settings.get("environments")
+    if not isinstance(environments, dict):
+        die("repository settings are missing environments")
+    if set(environments) != set(REQUIRED_ENVIRONMENT_SECRETS):
+        die("repository settings environments must be the canonical release environments")
+    for name, required_secrets in REQUIRED_ENVIRONMENT_SECRETS.items():
+        environment = environments.get(name)
+        if not isinstance(environment, dict):
+            die(f"repository settings are missing {name} environment")
+        if environment.get("required_secrets") != required_secrets:
+            die(f"{name} environment required_secrets are not canonical")
+
+    return {
+        "status": "unverified",
+        "repository_variables": sorted(REQUIRED_REPOSITORY_VARIABLES),
+        "repository_secrets": list(REQUIRED_REPOSITORY_SECRETS),
+        "environment_secrets": {
+            name: values for name, values in REQUIRED_ENVIRONMENT_SECRETS.items()
+        },
+        "action": (
+            "Configure the listed GitHub variables, repository secret, and "
+            "protected-environment secrets; their live values are never stored "
+            "in this repository."
+        ),
+    }
+
+
 def validate_governance(
     codeowners: Path,
     allowed_signers: Path,
@@ -1266,6 +1347,8 @@ def validate_governance(
     )
     if required_codeowner_patterns != list(RELEASE_CODEOWNER_PATTERNS):
         die("release_governance.required_codeowner_patterns is not canonical")
+
+    runtime_prerequisites = validate_runtime_configuration_contract(settings)
 
     protection = settings.get("main_protection")
     if not isinstance(protection, dict):
@@ -1366,6 +1449,7 @@ def validate_governance(
         "status": "ready" if checked_in_contract_ready else "blocked",
         "merge_ready": checked_in_contract_ready,
         "live_github_configuration": "unverified",
+        "runtime_prerequisites": runtime_prerequisites,
     }
     if require_ready and len(owners) < minimum_codeowners:
         die("at least two distinct named CODEOWNER accounts are required")

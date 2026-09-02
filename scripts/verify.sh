@@ -32,6 +32,22 @@ merge_readiness="$(python3 scripts/release_control.py merge-readiness \
 printf 'merge readiness (checked-in diagnostic; live GitHub configuration is unverified): %s\n' \
   "$merge_readiness"
 
+if merge_readiness="$(python3 scripts/release_control.py merge-readiness \
+  --codeowners .github/CODEOWNERS \
+  --allowed-signers policies/release-signers \
+  --settings bootstrap/repository-settings.json \
+  --policy-dir policies/products \
+  --contract-dir contracts \
+  --workflow-dir .github/workflows \
+  --require-ready)"; then
+  printf 'merge readiness (checked-in diagnostic; live GitHub configuration is unverified): %s\n' \
+    "$merge_readiness"
+else
+  printf 'merge readiness (checked-in diagnostic; live GitHub configuration is unverified): %s\n' \
+    "$merge_readiness" >&2
+  exit 1
+fi
+
 while IFS= read -r policy; do
   python3 scripts/release_control.py validate-policy \
     --policy "$policy" \

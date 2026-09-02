@@ -178,8 +178,10 @@ class WorkflowPolicyTests(unittest.TestCase):
 
     def test_untrusted_product_checks_are_separate_from_candidate_build(self) -> None:
         text = (WORKFLOWS / "release.yml").read_text(encoding="utf-8")
+        source = job_block(text, "source-fetch")
         validation = job_block(text, "product-validate")
         build = job_block(text, "build-test")
+        self.assertIn("environment: source-handoff", source)
         self.assertIn("run-policy", validation)
         self.assertNotIn("run-policy", build)
         self.assertNotIn("buildctl", validation)
@@ -262,7 +264,7 @@ class WorkflowPolicyTests(unittest.TestCase):
 
         self.assertIn("environment: source-handoff", build)
         self.assertIn("SOURCE_HANDOFF_AGE_IDENTITY", build)
-        self.assertNotIn("SOURCE_HANDOFF_AGE_IDENTITY", source)
+        self.assertNotIn("SOURCE_HANDOFF_AGE_IDENTITY", step_block(text, "Fail closed when source-reader prerequisites are absent"))
         self.assertNotIn("SOURCE_HANDOFF_AGE_IDENTITY", publish)
         self.assertNotIn("SOURCE_HANDOFF_AGE_IDENTITY", promote)
         self.assertIn("CANDIDATE_HANDOFF_AGE_IDENTITY", publish)
@@ -325,6 +327,11 @@ class WorkflowPolicyTests(unittest.TestCase):
         )
         self.assertIn('[[ -n "$CANDIDATE_HANDOFF_AGE_RECIPIENT" ]]', publish)
         self.assertIn('[[ -n "$CANDIDATE_HANDOFF_AGE_IDENTITY" ]]', publish)
+
+    def test_normal_verifier_requires_strict_merge_readiness(self) -> None:
+        text = (ROOT / "scripts/verify.sh").read_text(encoding="utf-8")
+        self.assertIn("merge-readiness", text)
+        self.assertIn("--require-ready", text)
 
     def test_publication_produces_and_verifies_all_signed_evidence_types(self) -> None:
         text = (WORKFLOWS / "release.yml").read_text(encoding="utf-8")
