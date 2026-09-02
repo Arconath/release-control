@@ -79,6 +79,20 @@ class WorkflowPolicyTests(unittest.TestCase):
         text = (WORKFLOWS / "validate.yml").read_text(encoding="utf-8")
         self.assertNotIn("github.event.pull_request.base.ref", text)
 
+    def test_validation_uses_trusted_base_and_inert_candidate_checkout(self) -> None:
+        text = (WORKFLOWS / "validate.yml").read_text(encoding="utf-8")
+        self.assertIn("pull_request_target:", text)
+        self.assertNotRegex(text, r"(?m)^\s+pull_request:\s*$")
+        self.assertIn("github.event.pull_request.base.sha", text)
+        self.assertIn("github.event.pull_request.head.sha", text)
+        self.assertIn("path: trusted", text)
+        self.assertIn("path: candidate", text)
+        self.assertIn("python3 trusted/scripts/verify_candidate.py", text)
+        self.assertIn('--trusted-sha "$EXPECTED_TRUSTED_SHA"', text)
+        self.assertIn('--candidate-sha "$EXPECTED_CANDIDATE_SHA"', text)
+        self.assertNotIn("./scripts/verify.sh", text)
+        self.assertNotIn("python3 candidate/", text)
+
     def test_trusted_workflows_require_the_canonical_repository_event_and_ref(self) -> None:
         release = (WORKFLOWS / "release.yml").read_text(encoding="utf-8")
         for name in (

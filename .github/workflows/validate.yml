@@ -1,7 +1,7 @@
 name: Validate release control
 
 on:
-  pull_request:
+  pull_request_target:
   push:
     branches: [main]
 
@@ -15,26 +15,56 @@ concurrency:
 jobs:
   validate:
     name: contracts and workflow policy
-    if: ${{ github.repository == 'Arconath/release-control' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == 'Arconath/release-control') }}
+    if: ${{ github.repository == 'Arconath/release-control' && ((github.event_name == 'pull_request_target' && github.event.pull_request.head.repo.full_name == 'Arconath/release-control') || (github.event_name == 'push' && github.ref == 'refs/heads/main')) }}
     runs-on:
       group: arconath-jit
       labels: [self-hosted, linux, x64, arconath-jit, rootless-buildkit]
     timeout-minutes: 10
     steps:
-      - name: Check out trusted repository source
+      - name: Check out trusted validator base
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          repository: ${{ github.repository }}
+          ref: ${{ github.event.pull_request.base.sha || github.sha }}
+          path: trusted
+          fetch-depth: 1
           persist-credentials: false
 
-      - name: Verify contracts and workflow policy
+      - name: Check out candidate as inert data
+        if: ${{ github.event_name == 'pull_request_target' }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ github.event.pull_request.head.repo.full_name }}
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: candidate
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Check out protected tree as inert data
+        if: ${{ github.event_name == 'push' }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ github.repository }}
+          ref: ${{ github.sha }}
+          path: candidate
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Verify candidate data with trusted base bootstrap
         shell: bash
         env:
+          EXPECTED_TRUSTED_SHA: ${{ github.event.pull_request.base.sha || github.sha }}
+          EXPECTED_CANDIDATE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
           PR_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
         run: |
           set -Eeuo pipefail
+          export GIT_CONFIG_GLOBAL=/dev/null
+          export GIT_CONFIG_NOSYSTEM=1
+          export GIT_OPTIONAL_LOCKS=0
+          export GIT_TERMINAL_PROMPT=0
           [[ "$GITHUB_REPOSITORY" == "Arconath/release-control" ]]
-          [[ "$GITHUB_EVENT_NAME" == "pull_request" || "$GITHUB_EVENT_NAME" == "push" ]]
-          if [[ "$GITHUB_EVENT_NAME" == "pull_request" ]]; then
+          [[ "$GITHUB_EVENT_NAME" == "pull_request_target" || "$GITHUB_EVENT_NAME" == "push" ]]
+          if [[ "$GITHUB_EVENT_NAME" == "pull_request_target" ]]; then
             [[ "$PR_HEAD_REPOSITORY" == "Arconath/release-control" ]]
           else
             [[ "$GITHUB_REF" == "refs/heads/main" ]]
@@ -49,4 +79,12 @@ jobs:
           test ! -e "/run/user/$(id -u)/docker.sock"
           test ! -L "/run/user/$(id -u)/docker.sock"
           [[ -z "${DOCKER_HOST:-}" && -z "${CONTAINER_HOST:-}" && -z "${PODMAN_HOST:-}" ]]
-          ./scripts/verify.sh
+          trusted_sha="$(git -C trusted --no-optional-locks -c core.fsmonitor=false -c core.hooksPath=/dev/null rev-parse --verify 'HEAD^{commit}')"
+          candidate_sha="$(git -C candidate --no-optional-locks -c core.fsmonitor=false -c core.hooksPath=/dev/null rev-parse --verify 'HEAD^{commit}')"
+          [[ "$trusted_sha" == "$EXPECTED_TRUSTED_SHA" ]]
+          [[ "$candidate_sha" == "$EXPECTED_CANDIDATE_SHA" ]]
+          python3 trusted/scripts/verify_candidate.py \
+            --trusted-root trusted \
+            --candidate-root candidate \
+            --trusted-sha "$EXPECTED_TRUSTED_SHA" \
+            --candidate-sha "$EXPECTED_CANDIDATE_SHA"
