@@ -487,6 +487,26 @@ class ReleaseControlTests(unittest.TestCase):
                 self.now,
             )
 
+    def test_release_intent_rejects_two_signatures_from_one_key(self) -> None:
+        public = self.key.with_suffix(".pub").read_text(encoding="utf-8").strip()
+        second_public = self.second_key.with_suffix(".pub").read_text(encoding="utf-8").strip()
+        mixed_key_signers = self.root / "mixed-key-signers"
+        mixed_key_signers.write_text(
+            f"release-operator {public}\n"
+            f"second-operator {public}\n"
+            f"unused-operator {second_public}\n",
+            encoding="utf-8",
+        )
+        self.signatures[1].write_bytes(self.signatures[0].read_bytes())
+        with self.assertRaisesRegex(rc.ContractError, "distinct cryptographic keys"):
+            rc.validate_intent(
+                self.intent_path,
+                self.signatures,
+                mixed_key_signers,
+                self.policy_dir,
+                self.now,
+            )
+
     def test_release_governance_requires_two_named_codeowners(self) -> None:
         codeowners = self.root / "CODEOWNERS"
         settings = self.root / "repository-settings.json"

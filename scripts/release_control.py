@@ -1178,38 +1178,63 @@ def verify_ssh_signatures(
     if allowed.is_symlink() or not allowed.is_file():
         die(f"missing allowed signers file: {allowed}")
     require_two_operator_keys(allowed)
-    for identity, signature in zip(identities, signatures):
-        command = [
-            "ssh-keygen",
-            "-Y",
-            "verify",
-            "-f",
-            str(allowed),
-            "-I",
-            identity,
-            "-n",
-            NAMESPACE,
-            "-s",
-            str(signature),
-        ]
-        try:
-            result = subprocess.run(command, input=intent.read_bytes(), capture_output=True, check=False)
-        except FileNotFoundError:
-            die("ssh-keygen is required to verify release intent signatures")
-        if result.returncode:
-            detail = result.stderr.decode(errors="replace").strip()
-            die(f"release intent signature verification failed for {identity}: {detail}")
+    entries = parse_allowed_signer_entries(allowed)
+    intent_bytes = intent.read_bytes()
+    verified_keys: list[tuple[str, str]] = []
+    with tempfile.TemporaryDirectory(prefix="release-control-signers-") as temporary:
+        temporary_dir = Path(temporary)
+        for index, (identity, signature) in enumerate(zip(identities, signatures)):
+            matched_keys: set[tuple[str, str]] = set()
+            last_detail = "no allowed key matched"
+            for key_index, (principals, options, key_type, key_blob) in enumerate(entries):
+                if identity not in principals:
+                    continue
+                isolated_allowed = temporary_dir / f"{index}-{key_index}.allowed"
+                isolated_allowed.write_text(
+                    " ".join((identity, *options, key_type, key_blob)) + "\n",
+                    encoding="utf-8",
+                )
+                command = [
+                    "ssh-keygen",
+                    "-Y",
+                    "verify",
+                    "-f",
+                    str(isolated_allowed),
+                    "-I",
+                    identity,
+                    "-n",
+                    NAMESPACE,
+                    "-s",
+                    str(signature),
+                ]
+                try:
+                    result = subprocess.run(
+                        command,
+                        input=intent_bytes,
+                        capture_output=True,
+                        check=False,
+                    )
+                except FileNotFoundError:
+                    die("ssh-keygen is required to verify release intent signatures")
+                if result.returncode == 0:
+                    matched_keys.add((key_type, key_blob))
+                else:
+                    last_detail = result.stderr.decode(errors="replace").strip()
+            if not matched_keys:
+                die(
+                    "release intent signature verification failed for "
+                    f"{identity}: {last_detail}"
+                )
+            if len(matched_keys) != 1:
+                die(f"release intent signature key is ambiguous for {identity}")
+            verified_keys.append(next(iter(matched_keys)))
+    if verified_keys[0] == verified_keys[1]:
+        die("release intent signatures must use two distinct cryptographic keys")
 
 
-def operator_key_inventory(allowed: Path) -> tuple[set[str], set[tuple[str, str]]]:
-    """Parse named public keys without exposing key material in diagnostics.
-
-    GitHub branch protection supplies the second human review for the change
-    that adds an intent. This local inventory prevents a future repository
-    configuration from silently reducing the cryptographic operator set to a
-    single key.
-    """
-
+def parse_allowed_signer_entries(
+    allowed: Path,
+) -> list[tuple[frozenset[str], tuple[str, ...], str, str]]:
     if allowed.is_symlink() or not allowed.is_file():
         die(f"allowed signers file must be a regular non-symlink file: {allowed}")
     try:
@@ -1217,8 +1242,7 @@ def operator_key_inventory(allowed: Path) -> tuple[set[str], set[tuple[str, str]
     except (OSError, UnicodeError) as exc:
         die(f"cannot read allowed signers file: {exc}")
 
-    operator_keys: set[tuple[str, str]] = set()
-    operator_identities: set[str] = set()
+    entries: list[tuple[frozenset[str], tuple[str, ...], str, str]] = []
     for line_number, line in enumerate(lines, 1):
         stripped = line.strip()
         if not stripped or stripped.startswith("#"):
@@ -1236,8 +1260,26 @@ def operator_key_inventory(allowed: Path) -> tuple[set[str], set[tuple[str, str]
         key_blob = fields[key_index + 1]
         if not SIGNER_KEY_BLOB.fullmatch(key_blob):
             die(f"allowed signers line {line_number} has an invalid public key encoding")
+        entries.append(
+            (frozenset(principals), tuple(fields[1:key_index]), fields[key_index], key_blob)
+        )
+    return entries
+
+
+def operator_key_inventory(allowed: Path) -> tuple[set[str], set[tuple[str, str]]]:
+    """Parse named public keys without exposing key material in diagnostics.
+
+    GitHub branch protection supplies the second human review for the change
+    that adds an intent. This local inventory prevents a future repository
+    configuration from silently reducing the cryptographic operator set to a
+    single key.
+    """
+
+    operator_keys: set[tuple[str, str]] = set()
+    operator_identities: set[str] = set()
+    for principals, _, key_type, key_blob in parse_allowed_signer_entries(allowed):
         operator_identities.update(principals)
-        operator_keys.add((fields[key_index], key_blob))
+        operator_keys.add((key_type, key_blob))
 
     return operator_identities, operator_keys
 

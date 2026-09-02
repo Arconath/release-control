@@ -65,18 +65,23 @@ identity.
 
 ## Release intent
 
-An operator creates a canonical JSON document under `intents/<intent-id>.json`
-and signs its exact bytes using an SSH signing key listed in
-`policies/release-signers`. The private signing key is never stored here.
+Two operators create a canonical JSON document under `intents/<intent-id>.json`
+and sign its exact bytes with two distinct SSH signing keys listed in
+`policies/release-signers`. The private signing keys are never stored here.
 
 ```sh
 python3 scripts/release_control.py canonicalize \
   --input intent.draft.json --output intents/2026-08-31-example.json
 ssh-keygen -Y sign -f /secure/path/release-key \
   -n arconath-release-intent intents/2026-08-31-example.json
+mv intents/2026-08-31-example.json.sig intents/2026-08-31-example.json.sig.1
+ssh-keygen -Y sign -f /secure/path/second-release-key \
+  -n arconath-release-intent intents/2026-08-31-example.json
+mv intents/2026-08-31-example.json.sig intents/2026-08-31-example.json.sig.2
 python3 scripts/release_control.py validate-intent \
   --intent intents/2026-08-31-example.json \
-  --signature intents/2026-08-31-example.json.sig \
+  --signature intents/2026-08-31-example.json.sig.1 \
+  --signature intents/2026-08-31-example.json.sig.2 \
   --allowed-signers policies/release-signers \
   --policy-dir policies/products
 ```

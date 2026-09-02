@@ -255,6 +255,7 @@ class BootstrapPolicyTests(unittest.TestCase):
         self.assertEqual(packages["minItems"], 1)
         self.assertEqual(packages["items"]["required"], ["name", "licenses"])
         self.assertEqual(packages["items"]["properties"]["licenses"]["minItems"], 1)
+        self.assertEqual(packages["items"]["properties"]["licenses"]["maxItems"], 1)
 
     def test_artifact_lock_proposal_schema_is_closed_world_and_product_only(self) -> None:
         schema = json.loads(

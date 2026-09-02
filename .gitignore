@@ -5,4 +5,6 @@ __pycache__/
 release-transport/
 intents/*.json
 intents/*.json.sig
+intents/*.json.sig.1
+intents/*.json.sig.2
 !intents/README.md

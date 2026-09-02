@@ -66,9 +66,14 @@ offline and verify them before submitting a release-control PR:
 ```sh
 ssh-keygen -Y sign -f /secure/arconath/release-signing/hermawan22-release \
   -n arconath-release-intent intents/2026-08-31-example.json
+mv intents/2026-08-31-example.json.sig intents/2026-08-31-example.json.sig.1
+ssh-keygen -Y sign -f /secure/arconath/release-signing/second-operator-release \
+  -n arconath-release-intent intents/2026-08-31-example.json
+mv intents/2026-08-31-example.json.sig intents/2026-08-31-example.json.sig.2
 python3 scripts/release_control.py validate-intent \
   --intent intents/2026-08-31-example.json \
-  --signature intents/2026-08-31-example.json.sig \
+  --signature intents/2026-08-31-example.json.sig.1 \
+  --signature intents/2026-08-31-example.json.sig.2 \
   --allowed-signers policies/release-signers \
   --policy-dir policies/products
 ```
