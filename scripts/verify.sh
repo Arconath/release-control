@@ -12,10 +12,46 @@ command -v shellcheck >/dev/null
 shellcheck scripts/*.sh
 git diff --check
 
+python3 scripts/release_control.py validate-policy-set \
+  --policy-dir policies/products
+governance_readiness="$(python3 scripts/release_control.py validate-governance \
+  --codeowners .github/CODEOWNERS \
+  --allowed-signers policies/release-signers \
+  --settings bootstrap/repository-settings.json \
+  --allow-incomplete)"
+printf 'governance readiness (checked-in diagnostic; live GitHub configuration is unverified): %s\n' \
+  "$governance_readiness"
+
+merge_readiness="$(python3 scripts/release_control.py merge-readiness \
+  --codeowners .github/CODEOWNERS \
+  --allowed-signers policies/release-signers \
+  --settings bootstrap/repository-settings.json \
+  --policy-dir policies/products \
+  --contract-dir contracts \
+  --workflow-dir .github/workflows)"
+printf 'merge readiness (checked-in diagnostic; live GitHub configuration is unverified): %s\n' \
+  "$merge_readiness"
+
+if merge_readiness="$(python3 scripts/release_control.py merge-readiness \
+  --codeowners .github/CODEOWNERS \
+  --allowed-signers policies/release-signers \
+  --settings bootstrap/repository-settings.json \
+  --policy-dir policies/products \
+  --contract-dir contracts \
+  --workflow-dir .github/workflows \
+  --require-ready)"; then
+  printf 'merge readiness (checked-in diagnostic; live GitHub configuration is unverified): %s\n' \
+    "$merge_readiness"
+else
+  printf 'merge readiness (checked-in diagnostic; live GitHub configuration is unverified): %s\n' \
+    "$merge_readiness" >&2
+  exit 1
+fi
+
 while IFS= read -r policy; do
   python3 scripts/release_control.py validate-policy \
     --policy "$policy" \
     --allow-disabled
-done < <(find policies/products -type f -name '*.json' -print | sort)
+done < <(find policies/products -type f \( -name '*.json' -o -name '*.json.disabled' \) -print | sort)
 
-printf 'release-control verification passed\n'
+printf 'release-control source verification passed; release readiness remains gated by the diagnostics above\n'

@@ -18,7 +18,7 @@ concurrency:
 jobs:
   validate-intent:
     name: Validate signed intent
-    if: ${{ github.ref == 'refs/heads/main' }}
+    if: ${{ github.repository == 'Arconath/release-control' && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' }}
     runs-on:
       group: arconath-jit
       labels: [self-hosted, linux, x64, arconath-jit, rootless-buildkit]
@@ -27,10 +27,13 @@ jobs:
       contents: read
     outputs:
       artifact-repository: ${{ steps.contract.outputs.artifact-repository }}
+      build-args-json: ${{ steps.contract.outputs.build-args-json }}
+      identity-build-args-json: ${{ steps.contract.outputs.identity-build-args-json }}
       context: ${{ steps.contract.outputs.context }}
       dockerfile: ${{ steps.contract.outputs.dockerfile }}
       intent-id: ${{ steps.contract.outputs.intent-id }}
       platform: ${{ steps.contract.outputs.platform }}
+      product-id: ${{ steps.contract.outputs.product-id }}
       policy-id: ${{ steps.contract.outputs.policy-id }}
       registry-host: ${{ steps.contract.outputs.registry-host }}
       source-name: ${{ steps.contract.outputs.source-name }}
@@ -44,13 +47,25 @@ jobs:
           ref: ${{ github.sha }}
           persist-credentials: false
 
-      - name: Validate canonical path and detached signature
+      - name: Validate canonical path and two detached signatures
         id: contract
         shell: bash
         env:
           INTENT_PATH: ${{ inputs.intent_path }}
         run: |
           set -Eeuo pipefail
+          [[ "$GITHUB_REPOSITORY" == "Arconath/release-control" ]]
+          [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" && "$GITHUB_REF" == "refs/heads/main" ]]
+          [[ "${RUNNER_ENVIRONMENT:-}" == "self-hosted" ]] || {
+            printf 'Trusted release requires the private self-hosted runner group.\n' >&2
+            exit 1
+          }
+          [[ "$(id -u)" != 0 ]]
+          test ! -e /var/run/docker.sock
+          test ! -L /var/run/docker.sock
+          test ! -e "/run/user/$(id -u)/docker.sock"
+          test ! -L "/run/user/$(id -u)/docker.sock"
+          [[ -z "${DOCKER_HOST:-}" && -z "${CONTAINER_HOST:-}" && -z "${PODMAN_HOST:-}" ]]
           current_main="$(git ls-remote --exit-code \
             "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git" refs/heads/main | cut -f1)"
           [[ "$current_main" == "$GITHUB_SHA" ]] || {
@@ -61,9 +76,14 @@ jobs:
             printf 'Intent must be a canonical file directly under intents/.\n' >&2
             exit 1
           }
+          python3 scripts/release_control.py validate-governance \
+            --codeowners .github/CODEOWNERS \
+            --allowed-signers policies/release-signers \
+            --settings bootstrap/repository-settings.json
           python3 scripts/release_control.py validate-intent \
             --intent "$INTENT_PATH" \
-            --signature "$INTENT_PATH.sig" \
+            --signature "$INTENT_PATH.sig.1" \
+            --signature "$INTENT_PATH.sig.2" \
             --allowed-signers policies/release-signers \
             --policy-dir policies/products \
             --github-output "$GITHUB_OUTPUT"
@@ -71,6 +91,8 @@ jobs:
   source-fetch:
     name: Fetch exact source
     needs: validate-intent
+    if: ${{ github.repository == 'Arconath/release-control' && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' }}
+    environment: source-handoff
     runs-on:
       group: arconath-jit
       labels: [self-hosted, linux, x64, arconath-jit, rootless-buildkit]
@@ -78,6 +100,56 @@ jobs:
     permissions:
       contents: read
     steps:
+      - name: Check out protected handoff verifier
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          path: control
+          persist-credentials: false
+
+      - name: Fail closed when source-reader prerequisites are absent
+        shell: bash
+        env:
+          SOURCE_READER_APP_ID: ${{ vars.SOURCE_READER_APP_ID }}
+          SOURCE_READER_PRIVATE_KEY: ${{ secrets.SOURCE_READER_PRIVATE_KEY }}
+          SOURCE_HANDOFF_AGE_RECIPIENT: ${{ vars.SOURCE_HANDOFF_AGE_RECIPIENT }}
+        run: |
+          set -Eeuo pipefail
+          command -v age >/dev/null
+          command -v git >/dev/null
+          command -v sha256sum >/dev/null
+          command -v python3 >/dev/null
+          [[ "$GITHUB_REPOSITORY" == "Arconath/release-control" ]]
+          [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" && "$GITHUB_REF" == "refs/heads/main" ]]
+          current_main="$(git ls-remote --exit-code \
+            "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git" refs/heads/main | cut -f1)"
+          [[ "$current_main" == "$GITHUB_SHA" ]] || {
+            printf 'Protected main changed before source access.\n' >&2
+            exit 1
+          }
+          [[ "${RUNNER_ENVIRONMENT:-}" == "self-hosted" ]] || {
+            printf 'Trusted release requires the private self-hosted runner group.\n' >&2
+            exit 1
+          }
+          [[ "$(id -u)" != 0 ]]
+          test ! -e /var/run/docker.sock
+          test ! -L /var/run/docker.sock
+          test ! -e "/run/user/$(id -u)/docker.sock"
+          test ! -L "/run/user/$(id -u)/docker.sock"
+          [[ -z "${DOCKER_HOST:-}" && -z "${CONTAINER_HOST:-}" && -z "${PODMAN_HOST:-}" ]]
+          [[ -n "$SOURCE_READER_APP_ID" ]] || {
+            printf 'SOURCE_READER_APP_ID is not configured.\n' >&2
+            exit 1
+          }
+          [[ -n "$SOURCE_READER_PRIVATE_KEY" ]] || {
+            printf 'SOURCE_READER_PRIVATE_KEY is not configured.\n' >&2
+            exit 1
+          }
+          [[ -n "$SOURCE_HANDOFF_AGE_RECIPIENT" ]] || {
+            printf 'SOURCE_HANDOFF_AGE_RECIPIENT is not configured.\n' >&2
+            exit 1
+          }
+
       - name: Mint source-only GitHub App token
         id: source-token
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
@@ -111,22 +183,191 @@ jobs:
           actual_tree="$(git -C product rev-parse 'HEAD^{tree}')"
           [[ "$actual_sha" == "$EXPECTED_SHA" ]] || { printf 'Source commit mismatch.\n' >&2; exit 1; }
           [[ "$actual_tree" == "$EXPECTED_TREE" ]] || { printf 'Source tree mismatch.\n' >&2; exit 1; }
-          git -C product archive --format=tar --prefix=product/ HEAD > product.tar
-          printf '%s  product.tar\n' "$(sha256sum product.tar | cut -d' ' -f1)" > product.tar.sha256
+          handoff_dir='release-transport/source-handoff'
+          rm -rf -- "$handoff_dir"
+          install -d -m 0700 "$handoff_dir"
+          git -C product archive --format=tar --prefix=product/ HEAD > "$handoff_dir/product.tar"
+
+      - name: Encrypt source before artifact transport
+        shell: bash
+        env:
+          SOURCE_HANDOFF_AGE_RECIPIENT: ${{ vars.SOURCE_HANDOFF_AGE_RECIPIENT }}
+          INTENT_PATH: ${{ inputs.intent_path }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          set -Eeuo pipefail
+          command -v age >/dev/null || { printf 'age is required on arconath-jit runners.\n' >&2; exit 1; }
+          [[ -n "$SOURCE_HANDOFF_AGE_RECIPIENT" ]] || {
+            printf 'SOURCE_HANDOFF_AGE_RECIPIENT is not configured.\n' >&2
+            exit 1
+          }
+          handoff_dir='release-transport/source-handoff'
+          age --encrypt --recipient "$SOURCE_HANDOFF_AGE_RECIPIENT" \
+            --output "$handoff_dir/product.tar.age" "$handoff_dir/product.tar"
+          (cd "$handoff_dir" && sha256sum product.tar.age) > "$handoff_dir/product.tar.age.sha256"
+          python3 control/scripts/release_control.py create-handoff \
+            --kind source \
+            --intent "control/$INTENT_PATH" \
+            --run-id "$RUN_ID" \
+            --plaintext "$handoff_dir/product.tar" \
+            --ciphertext "$handoff_dir/product.tar.age" \
+            --recipient "$SOURCE_HANDOFF_AGE_RECIPIENT" \
+            --output "$handoff_dir/source-handoff.json"
+          rm -f -- "$handoff_dir/product.tar"
+
+      - name: Revoke source-reader token before artifact handoff
+        if: ${{ always() && steps.source-token.outputs.token != '' }}
+        shell: bash
+        env:
+          SOURCE_TOKEN: ${{ steps.source-token.outputs.token }}
+        run: |
+          set -Eeuo pipefail
+          curl --fail --silent --show-error --request DELETE \
+            --header "Accept: application/vnd.github+json" \
+            --header "Authorization: Bearer ${SOURCE_TOKEN}" \
+            --header "X-GitHub-Api-Version: 2022-11-28" \
+            "${GITHUB_API_URL}/installation/token"
+          unset SOURCE_TOKEN
 
       - name: Upload immutable source transport
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: product-source-${{ needs.validate-intent.outputs.intent-id }}
           path: |
-            product.tar
-            product.tar.sha256
+            release-transport/source-handoff/product.tar.age
+            release-transport/source-handoff/product.tar.age.sha256
+            release-transport/source-handoff/source-handoff.json
           if-no-files-found: error
           retention-days: 1
 
-  build-test:
-    name: Build and test without release credentials
+      - name: Remove source checkout and plaintext transport
+        if: ${{ always() }}
+        shell: bash
+        run: rm -rf -- product release-transport
+
+  product-validate:
+    name: Validate untrusted product source
     needs: [validate-intent, source-fetch]
+    if: ${{ github.repository == 'Arconath/release-control' && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' }}
+    environment: source-handoff
+    runs-on:
+      group: arconath-jit
+      labels: [self-hosted, linux, x64, arconath-jit, rootless-buildkit]
+    timeout-minutes: 45
+    permissions: {}
+    steps:
+      - name: Check out protected validation policy
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          path: control
+          persist-credentials: false
+
+      - name: Download approved source transport for validation
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: product-source-${{ needs.validate-intent.outputs.intent-id }}
+          path: transport
+
+      - name: Fail closed when validation runner prerequisites are absent
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          command -v age >/dev/null
+          command -v python3 >/dev/null
+          command -v sha256sum >/dev/null
+          command -v tar >/dev/null
+          [[ "$GITHUB_REPOSITORY" == "Arconath/release-control" ]]
+          [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" && "$GITHUB_REF" == "refs/heads/main" ]]
+          current_main="$(git ls-remote --exit-code \
+            "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git" refs/heads/main | cut -f1)"
+          [[ "$current_main" == "$GITHUB_SHA" ]] || {
+            printf 'Protected main changed before source validation.\n' >&2
+            exit 1
+          }
+          [[ "${RUNNER_ENVIRONMENT:-}" == "self-hosted" ]] || {
+            printf 'Trusted release requires the private self-hosted runner group.\n' >&2
+            exit 1
+          }
+          [[ "$(id -u)" != 0 ]] || {
+            printf 'Product validation must run as a non-root user.\n' >&2
+            exit 1
+          }
+          test ! -e /var/run/docker.sock
+          test ! -L /var/run/docker.sock
+          test ! -e "/run/user/$(id -u)/docker.sock"
+          test ! -L "/run/user/$(id -u)/docker.sock"
+          [[ -z "${DOCKER_HOST:-}" && -z "${CONTAINER_HOST:-}" && -z "${PODMAN_HOST:-}" ]] || {
+            printf 'Docker/Podman host variables are forbidden in product validation.\n' >&2
+            exit 1
+          }
+      - name: Verify source transport for validation
+        shell: bash
+        env:
+          INTENT_PATH: ${{ inputs.intent_path }}
+          RUN_ID: ${{ github.run_id }}
+          SOURCE_HANDOFF_AGE_RECIPIENT: ${{ vars.SOURCE_HANDOFF_AGE_RECIPIENT }}
+        run: |
+          set -Eeuo pipefail
+          (cd transport && sha256sum --strict --check product.tar.age.sha256)
+          python3 control/scripts/release_control.py verify-handoff \
+            --kind source \
+            --handoff transport/source-handoff.json \
+            --intent "control/$INTENT_PATH" \
+            --run-id "$RUN_ID" \
+            --ciphertext transport/product.tar.age \
+            --recipient "$SOURCE_HANDOFF_AGE_RECIPIENT"
+
+      - name: Decrypt source for bounded validation
+        shell: bash
+        env:
+          SOURCE_HANDOFF_AGE_IDENTITY: ${{ secrets.SOURCE_HANDOFF_AGE_IDENTITY }}
+          INTENT_PATH: ${{ inputs.intent_path }}
+          RUN_ID: ${{ github.run_id }}
+          SOURCE_HANDOFF_AGE_RECIPIENT: ${{ vars.SOURCE_HANDOFF_AGE_RECIPIENT }}
+        run: |
+          set -Eeuo pipefail
+          identity_file="$RUNNER_TEMP/source-validation-handoff-identity"
+          umask 077
+          trap 'rm -f -- "$identity_file"' EXIT
+          printf '%s\n' "$SOURCE_HANDOFF_AGE_IDENTITY" > "$identity_file"
+          age --decrypt --identity "$identity_file" \
+            --output transport/product.tar transport/product.tar.age
+          python3 control/scripts/release_control.py verify-handoff \
+            --kind source \
+            --handoff transport/source-handoff.json \
+            --intent "control/$INTENT_PATH" \
+            --run-id "$RUN_ID" \
+            --ciphertext transport/product.tar.age \
+            --recipient "$SOURCE_HANDOFF_AGE_RECIPIENT" \
+            --plaintext transport/product.tar
+          rm -f -- transport/product.tar.age transport/product.tar.age.sha256 \
+            transport/source-handoff.json "$identity_file"
+          unset SOURCE_HANDOFF_AGE_IDENTITY
+          trap - EXIT
+          tar --extract --file transport/product.tar --no-same-owner --no-same-permissions
+          rm -f -- transport/product.tar
+
+      - name: Run centrally approved product verification
+        shell: bash
+        env:
+          POLICY_ID: ${{ needs.validate-intent.outputs.policy-id }}
+        run: |
+          set -Eeuo pipefail
+          python3 control/scripts/release_control.py run-policy \
+            --policy "control/policies/products/$POLICY_ID.json" \
+            --source product
+
+      - name: Remove validated product source
+        if: ${{ always() }}
+        shell: bash
+        run: rm -rf -- product transport "$RUNNER_TEMP/source-validation-handoff-identity"
+
+  build-test:
+    name: Build validated candidate without release credentials
+    needs: [validate-intent, source-fetch, product-validate]
+    if: ${{ github.repository == 'Arconath/release-control' && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' }}
+    environment: source-handoff
     runs-on:
       group: arconath-jit
       labels: [self-hosted, linux, x64, arconath-jit, rootless-buildkit]
@@ -146,31 +387,127 @@ jobs:
           name: product-source-${{ needs.validate-intent.outputs.intent-id }}
           path: transport
 
+      - name: Fail closed when build runner prerequisites are absent
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          command -v age >/dev/null
+          command -v buildctl >/dev/null
+          command -v syft >/dev/null
+          command -v grype >/dev/null
+          command -v stat >/dev/null
+          [[ "$GITHUB_REPOSITORY" == "Arconath/release-control" ]]
+          [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" && "$GITHUB_REF" == "refs/heads/main" ]]
+          current_main="$(git ls-remote --exit-code \
+            "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git" refs/heads/main | cut -f1)"
+          [[ "$current_main" == "$GITHUB_SHA" ]] || {
+            printf 'Protected main changed before candidate build.\n' >&2
+            exit 1
+          }
+          [[ "${RUNNER_ENVIRONMENT:-}" == "self-hosted" ]] || {
+            printf 'Trusted release requires the private self-hosted runner group.\n' >&2
+            exit 1
+          }
+          [[ "$(id -u)" != 0 ]] || {
+            printf 'Build-test must run as a non-root user.\n' >&2
+            exit 1
+          }
+          [[ -n "${BUILDKIT_HOST:-}" && "$BUILDKIT_HOST" == unix://* ]] || {
+            printf 'A rootless BuildKit endpoint is not configured.\n' >&2
+            exit 1
+          }
+          buildkit_socket="${BUILDKIT_HOST#unix://}"
+          [[ "$buildkit_socket" == "/run/user/$(id -u)/buildkit/buildkitd.sock" ]] || {
+            printf 'The configured endpoint is not the canonical rootless BuildKit socket.\n' >&2
+            exit 1
+          }
+          [[ -S "$buildkit_socket" ]] || {
+            printf 'The configured rootless BuildKit socket is unavailable.\n' >&2
+            exit 1
+          }
+          [[ "$(stat -c '%u' "$buildkit_socket")" == "$(id -u)" ]] || {
+            printf 'The BuildKit socket is not owned by the runner user.\n' >&2
+            exit 1
+          }
+          [[ -z "${DOCKER_HOST:-}" && -z "${CONTAINER_HOST:-}" && -z "${PODMAN_HOST:-}" ]] || {
+            printf 'Docker/Podman host variables are forbidden in build-test.\n' >&2
+            exit 1
+          }
+          test ! -e /var/run/docker.sock
+          test ! -L /var/run/docker.sock
+          test ! -e "/run/user/$(id -u)/docker.sock"
+          test ! -L "/run/user/$(id -u)/docker.sock"
+
       - name: Verify and unpack source transport
         shell: bash
+        env:
+          INTENT_PATH: ${{ inputs.intent_path }}
+          RUN_ID: ${{ github.run_id }}
+          SOURCE_HANDOFF_AGE_RECIPIENT: ${{ vars.SOURCE_HANDOFF_AGE_RECIPIENT }}
         run: |
           set -Eeuo pipefail
-          (cd transport && sha256sum --check product.tar.sha256)
-          tar --extract --file transport/product.tar --no-same-owner --no-same-permissions
+          command -v age >/dev/null || { printf 'age is required on arconath-jit runners.\n' >&2; exit 1; }
+          (cd transport && sha256sum --strict --check product.tar.age.sha256)
+          python3 control/scripts/release_control.py verify-handoff \
+            --kind source \
+            --handoff transport/source-handoff.json \
+            --intent "control/$INTENT_PATH" \
+            --run-id "$RUN_ID" \
+            --ciphertext transport/product.tar.age \
+            --recipient "$SOURCE_HANDOFF_AGE_RECIPIENT"
 
-      - name: Run centrally approved product verification
+      - name: Decrypt source only in the bounded handoff step
         shell: bash
         env:
-          POLICY_ID: ${{ needs.validate-intent.outputs.policy-id }}
+          SOURCE_HANDOFF_AGE_IDENTITY: ${{ secrets.SOURCE_HANDOFF_AGE_IDENTITY }}
+          INTENT_PATH: ${{ inputs.intent_path }}
+          RUN_ID: ${{ github.run_id }}
+          SOURCE_HANDOFF_AGE_RECIPIENT: ${{ vars.SOURCE_HANDOFF_AGE_RECIPIENT }}
         run: |
           set -Eeuo pipefail
-          python3 control/scripts/release_control.py run-policy \
-            --policy "control/policies/products/$POLICY_ID.json" \
-            --source product
+          [[ -n "$SOURCE_HANDOFF_AGE_IDENTITY" ]] || {
+            printf 'SOURCE_HANDOFF_AGE_IDENTITY is not configured.\n' >&2
+            exit 1
+          }
+          identity_file="$RUNNER_TEMP/source-handoff-identity"
+          umask 077
+          trap 'rm -f -- "$identity_file"' EXIT
+          printf '%s\n' "$SOURCE_HANDOFF_AGE_IDENTITY" > "$identity_file"
+          age --decrypt --identity "$identity_file" \
+            --output transport/product.tar transport/product.tar.age
+          python3 control/scripts/release_control.py verify-handoff \
+            --kind source \
+            --handoff transport/source-handoff.json \
+            --intent "control/$INTENT_PATH" \
+            --run-id "$RUN_ID" \
+            --ciphertext transport/product.tar.age \
+            --recipient "$SOURCE_HANDOFF_AGE_RECIPIENT" \
+            --plaintext transport/product.tar
+          rm -f -- transport/product.tar.age transport/product.tar.age.sha256 \
+            transport/source-handoff.json "$identity_file"
+          unset SOURCE_HANDOFF_AGE_IDENTITY
+          trap - EXIT
+          tar --extract --file transport/product.tar --no-same-owner --no-same-permissions
+          rm -f -- transport/product.tar
 
-      - name: Verify isolated rootless builder
+      - name: Verify canonical rootless builder endpoint
         shell: bash
         run: |
           set -Eeuo pipefail
+          [[ "$GITHUB_REPOSITORY" == "Arconath/release-control" ]]
+          [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" && "$GITHUB_REF" == "refs/heads/main" ]]
+          [[ "${RUNNER_ENVIRONMENT:-}" == "self-hosted" ]]
+          [[ "$(id -u)" != 0 ]]
           [[ -n "${BUILDKIT_HOST:-}" && "$BUILDKIT_HOST" == unix://* ]]
-          [[ -S "${BUILDKIT_HOST#unix://}" ]]
-          [[ -z "${DOCKER_HOST:-}" && -z "${CONTAINER_HOST:-}" ]]
-          test ! -S /var/run/docker.sock
+          buildkit_socket="${BUILDKIT_HOST#unix://}"
+          [[ "$buildkit_socket" == "/run/user/$(id -u)/buildkit/buildkitd.sock" ]]
+          [[ -S "$buildkit_socket" ]]
+          [[ "$(stat -c '%u' "$buildkit_socket")" == "$(id -u)" ]]
+          [[ -z "${DOCKER_HOST:-}" && -z "${CONTAINER_HOST:-}" && -z "${PODMAN_HOST:-}" ]]
+          test ! -e /var/run/docker.sock
+          test ! -L /var/run/docker.sock
+          test ! -e "/run/user/$(id -u)/docker.sock"
+          test ! -L "/run/user/$(id -u)/docker.sock"
           buildctl --addr "$BUILDKIT_HOST" debug workers >/dev/null
 
       - name: Build one non-published OCI archive
@@ -178,6 +515,8 @@ jobs:
         env:
           BUILD_CONTEXT: ${{ needs.validate-intent.outputs.context }}
           DOCKERFILE: ${{ needs.validate-intent.outputs.dockerfile }}
+          BUILD_ARGS_JSON: ${{ needs.validate-intent.outputs.build-args-json }}
+          IDENTITY_BUILD_ARGS_JSON: ${{ needs.validate-intent.outputs.identity-build-args-json }}
           PLATFORM: ${{ needs.validate-intent.outputs.platform }}
           SOURCE_SHA: ${{ needs.validate-intent.outputs.source-sha }}
         run: |
@@ -186,13 +525,42 @@ jobs:
           [[ -d "$context_path" ]]
           [[ -f "$context_path/$DOCKERFILE" ]]
           mkdir -p candidate
+          build_args=()
+          while IFS= read -r build_arg; do
+            [[ "$build_arg" == *=* ]] || {
+              printf 'Central policy emitted an invalid build argument.\n' >&2
+              exit 1
+            }
+            build_args+=(--opt "build-arg:$build_arg")
+          done < <(BUILD_ARGS_JSON="$BUILD_ARGS_JSON" IDENTITY_BUILD_ARGS_JSON="$IDENTITY_BUILD_ARGS_JSON" python3 - <<'PY'
+          import json
+          import os
+          static = json.loads(os.environ.get("BUILD_ARGS_JSON", "{}"))
+          identity = json.loads(os.environ.get("IDENTITY_BUILD_ARGS_JSON", "{}"))
+          if not isinstance(static, dict) or not isinstance(identity, dict):
+              raise SystemExit("build argument policy is not an object")
+          overlap = sorted(set(static) & set(identity))
+          if overlap:
+              raise SystemExit("static build arguments override signed identity: " + ", ".join(overlap))
+          value = {**static, **identity}
+          for key, item in sorted(value.items()):
+              if not isinstance(key, str) or not isinstance(item, str):
+                  raise SystemExit("build argument policy contains a non-string entry")
+              print(f"{key}={item}")
+          PY
+          )
+          # Source identity is injected by protected release-control code, not
+          # by the product intent.  Both names are supplied so older and
+          # component Containerfiles share one central build boundary.
+          build_args+=(--opt "build-arg:VCS_REF=$SOURCE_SHA")
+          build_args+=(--opt "build-arg:SOURCE_REVISION=$SOURCE_SHA")
           buildctl --addr "$BUILDKIT_HOST" build \
             --frontend dockerfile.v0 \
             --local "context=$context_path" \
             --local "dockerfile=$context_path" \
             --opt "filename=$DOCKERFILE" \
             --opt "platform=$PLATFORM" \
-            --opt "build-arg:VCS_REF=$SOURCE_SHA" \
+            "${build_args[@]}" \
             --output type=oci,dest=candidate/candidate.oci.tar
 
       - name: Generate and scan exact candidate SBOM
@@ -204,6 +572,14 @@ jobs:
           syft oci-archive:candidate/candidate.oci.tar -o spdx-json=candidate/sbom.spdx.json
           grype sbom:candidate/sbom.spdx.json --fail-on high -o json > candidate/vulnerabilities.json
 
+      - name: Enforce license evidence for every SBOM package
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 control/scripts/check-license-policy.py \
+            --sbom candidate/sbom.spdx.json \
+            --output candidate/licenses.json
+
       - name: Record exact source and OCI identity
         shell: bash
         env:
@@ -211,23 +587,97 @@ jobs:
         run: |
           set -Eeuo pipefail
           cp "control/$INTENT_PATH" candidate/release-intent.json
-          cp "control/$INTENT_PATH.sig" candidate/release-intent.json.sig
+          cp "control/$INTENT_PATH.sig.1" candidate/release-intent.json.sig.1
+          cp "control/$INTENT_PATH.sig.2" candidate/release-intent.json.sig.2
           python3 control/scripts/release_control.py build-evidence \
             --intent candidate/release-intent.json \
             --archive candidate/candidate.oci.tar \
+            --release-control-sha "$GITHUB_SHA" \
             --output candidate/build-evidence.json
+
+      - name: Generate exact SLSA provenance evidence
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 control/scripts/release_control.py build-provenance \
+            --intent candidate/release-intent.json \
+            --archive candidate/candidate.oci.tar \
+            --release-control-sha "$GITHUB_SHA" \
+            --output candidate/provenance.intoto.json
+
+      - name: Lock exact digest and pre-publication evidence
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 control/scripts/release_control.py create-evidence-lock \
+            --intent candidate/release-intent.json \
+            --build-evidence candidate/build-evidence.json \
+            --archive candidate/candidate.oci.tar \
+            --sbom candidate/sbom.spdx.json \
+            --licenses candidate/licenses.json \
+            --provenance candidate/provenance.intoto.json \
+            --vulnerabilities candidate/vulnerabilities.json \
+            --release-control-sha "$GITHUB_SHA" \
+            --output candidate/evidence-lock.json
+
+      - name: Encrypt OCI candidate before artifact transport
+        shell: bash
+        env:
+          CANDIDATE_HANDOFF_AGE_RECIPIENT: ${{ vars.CANDIDATE_HANDOFF_AGE_RECIPIENT }}
+          INTENT_PATH: ${{ inputs.intent_path }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          set -Eeuo pipefail
+          command -v age >/dev/null || { printf 'age is required on arconath-jit runners.\n' >&2; exit 1; }
+          [[ -n "$CANDIDATE_HANDOFF_AGE_RECIPIENT" ]] || {
+            printf 'CANDIDATE_HANDOFF_AGE_RECIPIENT is not configured.\n' >&2
+            exit 1
+          }
+          age --encrypt --recipient "$CANDIDATE_HANDOFF_AGE_RECIPIENT" \
+            --output candidate/candidate.oci.tar.age candidate/candidate.oci.tar
+          (cd candidate && sha256sum candidate.oci.tar.age) > candidate/candidate.oci.tar.age.sha256
+          python3 control/scripts/release_control.py create-handoff \
+            --kind candidate \
+            --intent candidate/release-intent.json \
+            --run-id "$RUN_ID" \
+            --plaintext candidate/candidate.oci.tar \
+            --ciphertext candidate/candidate.oci.tar.age \
+            --recipient "$CANDIDATE_HANDOFF_AGE_RECIPIENT" \
+            --output candidate/candidate-handoff.json
+          rm -f -- candidate/candidate.oci.tar
 
       - name: Upload non-published release candidate
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: release-candidate-${{ needs.validate-intent.outputs.intent-id }}
-          path: candidate/
+          path: |
+            candidate/candidate.oci.tar.age
+            candidate/candidate.oci.tar.age.sha256
+            candidate/candidate-handoff.json
+            candidate/release-intent.json
+            candidate/release-intent.json.sig.1
+            candidate/release-intent.json.sig.2
+            candidate/build-evidence.json
+            candidate/evidence-lock.json
+            candidate/sbom.spdx.json
+            candidate/licenses.json
+            candidate/provenance.intoto.json
+            candidate/vulnerabilities.json
           if-no-files-found: error
           retention-days: 1
+
+      - name: Remove plaintext source and candidate
+        if: ${{ always() }}
+        shell: bash
+        run: rm -rf -- product transport candidate .release-work
 
   publish-sign:
     name: Publish and sign exact digest
     needs: [validate-intent, build-test]
+    if: ${{ github.repository == 'Arconath/release-control' && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' }}
+    concurrency:
+      group: trusted-publish-${{ needs.validate-intent.outputs.policy-id }}-${{ needs.validate-intent.outputs.source-sha }}
+      cancel-in-progress: false
     environment: publication
     runs-on:
       group: arconath-jit
@@ -252,6 +702,70 @@ jobs:
           name: release-candidate-${{ needs.validate-intent.outputs.intent-id }}
           path: candidate
 
+      - name: Fail closed when publication prerequisites are absent
+        shell: bash
+        env:
+          CONFIGURED_REGISTRY_HOST: ${{ vars.ARCONATH_REGISTRY_HOST }}
+          REGISTRY_HOST: ${{ needs.validate-intent.outputs.registry-host }}
+          ARCONATH_REGISTRY_USERNAME: ${{ secrets.ARCONATH_REGISTRY_USERNAME }}
+          ARCONATH_REGISTRY_PASSWORD: ${{ secrets.ARCONATH_REGISTRY_PASSWORD }}
+          CANDIDATE_HANDOFF_AGE_RECIPIENT: ${{ vars.CANDIDATE_HANDOFF_AGE_RECIPIENT }}
+        run: |
+          set -Eeuo pipefail
+          command -v age >/dev/null
+          command -v jq >/dev/null
+          command -v skopeo >/dev/null
+          [[ "$GITHUB_REPOSITORY" == "Arconath/release-control" ]]
+          [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" && "$GITHUB_REF" == "refs/heads/main" ]]
+          current_main="$(git ls-remote --exit-code \
+            "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git" refs/heads/main | cut -f1)"
+          [[ "$current_main" == "$GITHUB_SHA" ]] || {
+            printf 'Protected main changed before publication.\n' >&2
+            exit 1
+          }
+          [[ "${RUNNER_ENVIRONMENT:-}" == "self-hosted" ]] || {
+            printf 'Trusted release requires the private self-hosted runner group.\n' >&2
+            exit 1
+          }
+          [[ "$(id -u)" != 0 ]] || {
+            printf 'Publication must run as a non-root user.\n' >&2
+            exit 1
+          }
+          test ! -S /var/run/docker.sock
+          test ! -e /var/run/docker.sock
+          test ! -L /var/run/docker.sock
+          test ! -e "/run/user/$(id -u)/docker.sock"
+          test ! -L "/run/user/$(id -u)/docker.sock"
+          [[ -z "${DOCKER_HOST:-}" && -z "${CONTAINER_HOST:-}" && -z "${PODMAN_HOST:-}" ]] || {
+            printf 'Docker/Podman host variables are forbidden in publish-sign.\n' >&2
+            exit 1
+          }
+          [[ -n "$CONFIGURED_REGISTRY_HOST" && "$CONFIGURED_REGISTRY_HOST" == "$REGISTRY_HOST" ]] || {
+            printf 'Configured canonical registry host is missing or differs from signed policy.\n' >&2
+            exit 1
+          }
+          [[ -n "$ARCONATH_REGISTRY_USERNAME" && -n "$ARCONATH_REGISTRY_PASSWORD" ]] || {
+            printf 'Canonical registry robot credentials are not configured.\n' >&2
+            exit 1
+          }
+          [[ -n "$CANDIDATE_HANDOFF_AGE_RECIPIENT" ]] || {
+            printf 'CANDIDATE_HANDOFF_AGE_RECIPIENT is not configured.\n' >&2
+            exit 1
+          }
+          test ! -e product
+
+      - name: Install Cosign before any registry mutation
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          cosign-release: v3.1.3
+
+      - name: Verify signing tool before any registry mutation
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          command -v cosign >/dev/null
+          cosign version >/dev/null
+
       - name: Revalidate signed identity after the untrusted build boundary
         shell: bash
         env:
@@ -273,7 +787,8 @@ jobs:
           output="$RUNNER_TEMP/revalidated-identity"
           python3 control/scripts/release_control.py validate-intent \
             --intent candidate/release-intent.json \
-            --signature candidate/release-intent.json.sig \
+            --signature candidate/release-intent.json.sig.1 \
+            --signature candidate/release-intent.json.sig.2 \
             --allowed-signers control/policies/release-signers \
             --policy-dir control/policies/products \
             --github-output "$output"
@@ -284,6 +799,68 @@ jobs:
           grep -Fqx "source-sha=$SOURCE_SHA" "$output"
           grep -Fqx "source-tree=$SOURCE_TREE" "$output"
           grep -Fqx "artifact-repository=$ARTIFACT_REPOSITORY" "$output"
+
+      - name: Verify encrypted candidate handoff
+        shell: bash
+        env:
+          CANDIDATE_HANDOFF_AGE_RECIPIENT: ${{ vars.CANDIDATE_HANDOFF_AGE_RECIPIENT }}
+          INTENT_PATH: ${{ inputs.intent_path }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          set -Eeuo pipefail
+          command -v age >/dev/null || { printf 'age is required on arconath-jit runners.\n' >&2; exit 1; }
+          (cd candidate && sha256sum --strict --check candidate.oci.tar.age.sha256)
+          python3 control/scripts/release_control.py verify-handoff \
+            --kind candidate \
+            --handoff candidate/candidate-handoff.json \
+            --intent "control/$INTENT_PATH" \
+            --run-id "$RUN_ID" \
+            --ciphertext candidate/candidate.oci.tar.age \
+            --recipient "$CANDIDATE_HANDOFF_AGE_RECIPIENT"
+
+      - name: Decrypt candidate only after identity revalidation
+        shell: bash
+        env:
+          CANDIDATE_HANDOFF_AGE_IDENTITY: ${{ secrets.CANDIDATE_HANDOFF_AGE_IDENTITY }}
+          CANDIDATE_HANDOFF_AGE_RECIPIENT: ${{ vars.CANDIDATE_HANDOFF_AGE_RECIPIENT }}
+          INTENT_PATH: ${{ inputs.intent_path }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          set -Eeuo pipefail
+          [[ -n "$CANDIDATE_HANDOFF_AGE_IDENTITY" ]] || {
+            printf 'CANDIDATE_HANDOFF_AGE_IDENTITY is not configured.\n' >&2
+            exit 1
+          }
+          identity_file="$RUNNER_TEMP/candidate-handoff-identity"
+          umask 077
+          trap 'rm -f -- "$identity_file"' EXIT
+          printf '%s\n' "$CANDIDATE_HANDOFF_AGE_IDENTITY" > "$identity_file"
+          age --decrypt --identity "$identity_file" \
+            --output candidate/candidate.oci.tar candidate/candidate.oci.tar.age
+          python3 control/scripts/release_control.py verify-handoff \
+            --kind candidate \
+            --handoff candidate/candidate-handoff.json \
+            --intent "control/$INTENT_PATH" \
+            --run-id "$RUN_ID" \
+            --ciphertext candidate/candidate.oci.tar.age \
+            --recipient "$CANDIDATE_HANDOFF_AGE_RECIPIENT" \
+            --plaintext candidate/candidate.oci.tar
+          rm -f -- candidate/candidate.oci.tar.age candidate/candidate.oci.tar.age.sha256 \
+            candidate/candidate-handoff.json "$identity_file"
+          unset CANDIDATE_HANDOFF_AGE_IDENTITY
+          trap - EXIT
+
+      - name: Verify exact evidence lock before registry mutation
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 control/scripts/release_control.py verify-evidence-lock \
+            --intent candidate/release-intent.json \
+            --lock candidate/evidence-lock.json \
+            --build-evidence candidate/build-evidence.json \
+            --archive candidate/candidate.oci.tar \
+            --evidence-dir candidate \
+            --release-control-sha "$GITHUB_SHA"
 
       - name: Publish or resume the exact immutable OCI digest
         id: publish
@@ -297,6 +874,12 @@ jobs:
           SOURCE_SHA: ${{ needs.validate-intent.outputs.source-sha }}
         run: |
           set -Eeuo pipefail
+          current_main="$(git ls-remote --exit-code \
+            "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git" refs/heads/main | cut -f1)"
+          [[ "$current_main" == "$GITHUB_SHA" ]] || {
+            printf 'Protected main changed before registry mutation.\n' >&2
+            exit 1
+          }
           auth_file="$RUNNER_TEMP/release-control-auth.json"
           export REGISTRY_AUTH_FILE="$auth_file"
           trap 'rm -f "$auth_file"' EXIT
@@ -312,12 +895,35 @@ jobs:
             printf 'Artifact repository is outside the canonical registry.\n' >&2
             exit 1
           }
+          expected_digest="$(jq -er '.artifact.digest' candidate/build-evidence.json)"
+          [[ "$expected_digest" =~ ^sha256:[0-9a-f]{64}$ ]] || {
+            printf 'Build evidence does not contain an immutable OCI digest.\n' >&2
+            exit 1
+          }
+          zero_digest="sha256:$(printf '%064d' 0)"
+          [[ "$expected_digest" != "$zero_digest" ]] || {
+            printf 'Build evidence contains an empty OCI digest.\n' >&2
+            exit 1
+          }
           printf '%s' "$ARCONATH_REGISTRY_PASSWORD" | skopeo login --authfile "$auth_file" \
             --username "$ARCONATH_REGISTRY_USERNAME" --password-stdin "$REGISTRY_HOST"
           immutable_tag="sha-$SOURCE_SHA"
-          if skopeo inspect --authfile "$auth_file" "docker://$IMAGE:$immutable_tag" >/dev/null 2>&1; then
+          inspect_error="$RUNNER_TEMP/immutable-tag-inspect.error"
+          if skopeo inspect --authfile "$auth_file" "docker://$IMAGE:$immutable_tag" \
+            >/dev/null 2>"$inspect_error"; then
             printf 'Immutable source tag exists; verifying exact digest before resuming signing.\n'
+            existing_digest="$(skopeo inspect --authfile "$auth_file" \
+              --format '{{.Digest}}' "docker://$IMAGE:$immutable_tag")"
+            [[ "$existing_digest" == "$expected_digest" ]] || {
+              printf 'Existing immutable source tag resolves to a different digest; refusing overwrite.\n' >&2
+              exit 1
+            }
           else
+            if ! grep -Eiq 'manifest unknown|name unknown|status code: 404|statuscode: 404|HTTP 404|404 Not Found' "$inspect_error"; then
+              cat "$inspect_error" >&2
+              printf 'Unable to prove immutable source tag is absent; refusing to publish.\n' >&2
+              exit 1
+            fi
             skopeo copy --all --authfile "$auth_file" \
               oci-archive:candidate/candidate.oci.tar \
               "docker://$IMAGE:$immutable_tag"
@@ -328,13 +934,9 @@ jobs:
             --evidence candidate/build-evidence.json \
             --archive candidate/candidate.oci.tar \
             --published-digest "$published_digest" \
+            --release-control-sha "$GITHUB_SHA" \
             --output candidate/release-record.json
           printf 'digest=%s\n' "$published_digest" >> "$GITHUB_OUTPUT"
-
-      - name: Install Cosign
-        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
-        with:
-          cosign-release: v3.1.3
 
       - name: Sign and attest exact digest
         shell: bash
@@ -346,6 +948,12 @@ jobs:
           REGISTRY_HOST: ${{ needs.validate-intent.outputs.registry-host }}
         run: |
           set -Eeuo pipefail
+          current_main="$(git ls-remote --exit-code \
+            "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git" refs/heads/main | cut -f1)"
+          [[ "$current_main" == "$GITHUB_SHA" ]] || {
+            printf 'Protected main changed before artifact signing.\n' >&2
+            exit 1
+          }
           export DOCKER_CONFIG="$RUNNER_TEMP/cosign-registry-auth"
           install -d -m 0700 "$DOCKER_CONFIG"
           trap 'rm -rf "$DOCKER_CONFIG"' EXIT
@@ -353,14 +961,98 @@ jobs:
             --authfile "$DOCKER_CONFIG/config.json" \
             --username "$ARCONATH_REGISTRY_USERNAME" --password-stdin "$REGISTRY_HOST"
           reference="$IMAGE@$DIGEST"
-          cosign sign --yes "$reference"
-          cosign attest --yes --type spdxjson --predicate candidate/sbom.spdx.json "$reference"
-          cosign attest --yes --type https://arconath.com/BuildEvidence/v1 \
+          workflow_claims=(
+            --certificate-github-workflow-trigger workflow_dispatch
+            --certificate-github-workflow-sha "$GITHUB_SHA"
+            --certificate-github-workflow-name "Trusted product release"
+            --certificate-github-workflow-repository "Arconath/release-control"
+            --certificate-github-workflow-ref refs/heads/main
+          )
+          cosign sign --yes --bundle candidate/artifact.sigstore.json "$reference"
+          cosign attest --yes --bundle candidate/build-evidence.attestation.sigstore.json \
+            --type https://arconath.com/BuildEvidence/v1 \
             --predicate candidate/build-evidence.json "$reference"
-          cosign verify \
-            --certificate-identity-regexp '^https://github\.com/Arconath/release-control/\.github/workflows/release\.yml@refs/heads/main$' \
+          cosign attest --yes --bundle candidate/license.attestation.sigstore.json \
+            --type https://arconath.com/LicenseEvidence/v1 \
+            --predicate candidate/licenses.json "$reference"
+          cosign attest --yes --bundle candidate/sbom.attestation.sigstore.json \
+            --type spdxjson --predicate candidate/sbom.spdx.json "$reference"
+          cosign attest --yes --bundle candidate/provenance.attestation.sigstore.json \
+            --type https://slsa.dev/provenance/v1 \
+            --predicate candidate/provenance.intoto.json "$reference"
+          cosign attest --yes --bundle candidate/vulnerability.attestation.sigstore.json \
+            --type https://arconath.com/VulnerabilityScan/v1 \
+            --predicate candidate/vulnerabilities.json "$reference"
+          cosign verify --bundle candidate/artifact.sigstore.json \
+            --certificate-identity-regexp \
+              '^https://github\.com/Arconath/release-control/\.github/workflows/release\.yml@refs/heads/main$' \
             --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            "${workflow_claims[@]}" \
             "$reference" >/dev/null
+          verify_attestation() {
+            local bundle="$1"
+            local cosign_type="$2"
+            local predicate_type="$3"
+            local predicate="$4"
+            local verified_output="$5"
+            cosign verify-attestation --bundle "$bundle" \
+              --type "$cosign_type" \
+              --certificate-identity-regexp \
+                '^https://github\.com/Arconath/release-control/\.github/workflows/release\.yml@refs/heads/main$' \
+              --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+              "${workflow_claims[@]}" \
+              "$reference" > "$verified_output"
+            python3 control/scripts/release_control.py verify-attestation-payload \
+              --envelope "$verified_output" \
+              --predicate "$predicate" \
+              --predicate-type "$predicate_type" \
+              --artifact-repository "$IMAGE" \
+              --artifact-digest "$DIGEST"
+            rm -f -- "$verified_output"
+          }
+          verify_attestation \
+            candidate/build-evidence.attestation.sigstore.json \
+            https://arconath.com/BuildEvidence/v1 \
+            https://arconath.com/BuildEvidence/v1 \
+            candidate/build-evidence.json \
+            candidate/build-evidence.verified-attestation.json
+          verify_attestation \
+            candidate/license.attestation.sigstore.json \
+            https://arconath.com/LicenseEvidence/v1 \
+            https://arconath.com/LicenseEvidence/v1 \
+            candidate/licenses.json \
+            candidate/license.verified-attestation.json
+          verify_attestation \
+            candidate/sbom.attestation.sigstore.json \
+            spdxjson \
+            https://spdx.dev/Document \
+            candidate/sbom.spdx.json \
+            candidate/sbom.verified-attestation.json
+          verify_attestation \
+            candidate/provenance.attestation.sigstore.json \
+            https://slsa.dev/provenance/v1 \
+            https://slsa.dev/provenance/v1 \
+            candidate/provenance.intoto.json \
+            candidate/provenance.verified-attestation.json
+          verify_attestation \
+            candidate/vulnerability.attestation.sigstore.json \
+            https://arconath.com/VulnerabilityScan/v1 \
+            https://arconath.com/VulnerabilityScan/v1 \
+            candidate/vulnerabilities.json \
+            candidate/vulnerability.verified-attestation.json
+
+      - name: Finalize immutable release record
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 control/scripts/release_control.py finalize-release \
+            --intent candidate/release-intent.json \
+            --release-record candidate/release-record.json \
+            --evidence-dir candidate \
+            --archive candidate/candidate.oci.tar \
+            --release-control-sha "$GITHUB_SHA" \
+            --output candidate/release-record.final.json
+          mv -- candidate/release-record.final.json candidate/release-record.json
 
       - name: Upload published evidence
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -368,17 +1060,33 @@ jobs:
           name: published-evidence-${{ needs.validate-intent.outputs.intent-id }}
           path: |
             candidate/release-intent.json
-            candidate/release-intent.json.sig
+            candidate/release-intent.json.sig.1
+            candidate/release-intent.json.sig.2
             candidate/build-evidence.json
+            candidate/evidence-lock.json
             candidate/release-record.json
             candidate/sbom.spdx.json
+            candidate/licenses.json
+            candidate/provenance.intoto.json
             candidate/vulnerabilities.json
+            candidate/artifact.sigstore.json
+            candidate/build-evidence.attestation.sigstore.json
+            candidate/license.attestation.sigstore.json
+            candidate/sbom.attestation.sigstore.json
+            candidate/provenance.attestation.sigstore.json
+            candidate/vulnerability.attestation.sigstore.json
           if-no-files-found: error
           retention-days: 30
+
+      - name: Remove plaintext candidate
+        if: ${{ always() }}
+        shell: bash
+        run: rm -rf -- candidate "$RUNNER_TEMP/candidate-handoff-identity"
 
   promote:
     name: Emit promotion and rollback evidence
     needs: [validate-intent, publish-sign]
+    if: ${{ github.repository == 'Arconath/release-control' && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' }}
     environment: promotion
     runs-on:
       group: arconath-jit
@@ -401,6 +1109,57 @@ jobs:
           name: published-evidence-${{ needs.validate-intent.outputs.intent-id }}
           path: evidence
 
+      - name: Fail closed when promotion runner prerequisites are absent
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          command -v gh >/dev/null
+          [[ "$GITHUB_REPOSITORY" == "Arconath/release-control" ]]
+          [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" && "$GITHUB_REF" == "refs/heads/main" ]]
+          [[ "${RUNNER_ENVIRONMENT:-}" == "self-hosted" ]] || {
+            printf 'Trusted release requires the private self-hosted runner group.\n' >&2
+            exit 1
+          }
+          [[ "$(id -u)" != 0 ]]
+          test ! -e /var/run/docker.sock
+          test ! -L /var/run/docker.sock
+          test ! -e "/run/user/$(id -u)/docker.sock"
+          test ! -L "/run/user/$(id -u)/docker.sock"
+          [[ -z "${DOCKER_HOST:-}" && -z "${CONTAINER_HOST:-}" && -z "${PODMAN_HOST:-}" ]]
+
+      - name: Install Cosign for promotion verification
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          cosign-release: v3.1.3
+
+      - name: Configure read-only registry verification
+        shell: bash
+        env:
+          CONFIGURED_REGISTRY_HOST: ${{ vars.ARCONATH_REGISTRY_HOST }}
+          REGISTRY_HOST: ${{ needs.validate-intent.outputs.registry-host }}
+          ARCONATH_REGISTRY_READ_USERNAME: ${{ secrets.ARCONATH_REGISTRY_READ_USERNAME }}
+          ARCONATH_REGISTRY_READ_PASSWORD: ${{ secrets.ARCONATH_REGISTRY_READ_PASSWORD }}
+        run: |
+          set -Eeuo pipefail
+          command -v skopeo >/dev/null
+          [[ -n "$CONFIGURED_REGISTRY_HOST" && "$CONFIGURED_REGISTRY_HOST" == "$REGISTRY_HOST" ]] || {
+            printf 'Configured canonical registry host is missing or differs from signed policy.\n' >&2
+            exit 1
+          }
+          [[ -n "$ARCONATH_REGISTRY_READ_USERNAME" && -n "$ARCONATH_REGISTRY_READ_PASSWORD" ]] || {
+            printf 'Read-only canonical registry verifier credentials are not configured.\n' >&2
+            exit 1
+          }
+          auth_dir="$RUNNER_TEMP/rollback-registry-auth"
+          umask 077
+          install -d -m 0700 "$auth_dir"
+          printf '%s' "$ARCONATH_REGISTRY_READ_PASSWORD" | skopeo login \
+            --authfile "$auth_dir/config.json" \
+            --username "$ARCONATH_REGISTRY_READ_USERNAME" --password-stdin "$REGISTRY_HOST"
+          chmod 0600 "$auth_dir/config.json"
+          printf 'DOCKER_CONFIG=%s\n' "$auth_dir" >> "$GITHUB_ENV"
+          printf 'REGISTRY_AUTH_FILE=%s\n' "$auth_dir/config.json" >> "$GITHUB_ENV"
+
       - name: Emit immutable promotion and rollback manifests
         env:
           PUBLISHED_DIGEST: ${{ needs.publish-sign.outputs.digest }}
@@ -414,28 +1173,62 @@ jobs:
           }
           python3 control/scripts/release_control.py validate-intent \
             --intent evidence/release-intent.json \
-            --signature evidence/release-intent.json.sig \
+            --signature evidence/release-intent.json.sig.1 \
+            --signature evidence/release-intent.json.sig.2 \
             --allowed-signers control/policies/release-signers \
             --policy-dir control/policies/products
+          python3 control/scripts/release_control.py verify-promotion-inputs \
+            --intent evidence/release-intent.json \
+            --release-record evidence/release-record.json \
+            --evidence-dir evidence \
+            --release-control-sha "$GITHUB_SHA"
           python3 control/scripts/release_control.py emit-manifests \
             --intent evidence/release-intent.json \
             --release-record evidence/release-record.json \
+            --policy "control/policies/products/${{ needs.validate-intent.outputs.policy-id }}.json" \
             --promotion evidence/promotion-manifest.json \
             --rollback evidence/rollback-manifest.json \
-            --expected-digest "$PUBLISHED_DIGEST"
+            --artifact-lock-proposal evidence/artifact-lock-proposal.json \
+            --expected-digest "$PUBLISHED_DIGEST" \
+            --release-control-sha "$GITHUB_SHA" \
+            --evidence-dir evidence
 
-      - name: Install Cosign
-        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
-        with:
-          cosign-release: v3.1.3
-
-      - name: Sign promotion and rollback manifests
+      - name: Sign promotion, rollback, and artifact-lock proposal
         run: |
           set -Eeuo pipefail
+          current_main="$(git ls-remote --exit-code \
+            "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git" refs/heads/main | cut -f1)"
+          [[ "$current_main" == "$GITHUB_SHA" ]] || {
+            printf 'Protected main changed before manifest signing.\n' >&2
+            exit 1
+          }
+          workflow_claims=(
+            --certificate-github-workflow-trigger workflow_dispatch
+            --certificate-github-workflow-sha "$GITHUB_SHA"
+            --certificate-github-workflow-name "Trusted product release"
+            --certificate-github-workflow-repository "Arconath/release-control"
+            --certificate-github-workflow-ref refs/heads/main
+          )
           cosign sign-blob --yes --bundle evidence/promotion-manifest.sigstore.json \
             evidence/promotion-manifest.json
           cosign sign-blob --yes --bundle evidence/rollback-manifest.sigstore.json \
             evidence/rollback-manifest.json
+          cosign sign-blob --yes --bundle evidence/artifact-lock-proposal.sigstore.json \
+            evidence/artifact-lock-proposal.json
+          for manifest in promotion rollback; do
+            cosign verify-blob --bundle "evidence/$manifest-manifest.sigstore.json" \
+              --certificate-identity-regexp \
+                '^https://github\.com/Arconath/release-control/\.github/workflows/release\.yml@refs/heads/main$' \
+              --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+              "${workflow_claims[@]}" \
+              "evidence/$manifest-manifest.json" >/dev/null
+          done
+          cosign verify-blob --bundle evidence/artifact-lock-proposal.sigstore.json \
+            --certificate-identity-regexp \
+              '^https://github\.com/Arconath/release-control/\.github/workflows/release\.yml@refs/heads/main$' \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            "${workflow_claims[@]}" \
+            evidence/artifact-lock-proposal.json >/dev/null
 
       - name: Publish immutable release evidence
         shell: bash
@@ -445,12 +1238,55 @@ jobs:
           RELEASE_DIGEST: ${{ needs.publish-sign.outputs.digest }}
         run: |
           set -Eeuo pipefail
+          current_main="$(git ls-remote --exit-code \
+            "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git" refs/heads/main | cut -f1)"
+          [[ "$current_main" == "$GITHUB_SHA" ]] || {
+            printf 'Protected main changed before evidence publication.\n' >&2
+            exit 1
+          }
           evidence_tag="evidence-$INTENT_ID"
-          if gh release view "$evidence_tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+          release_view_error="$RUNNER_TEMP/evidence-release-view.error"
+          if gh release view "$evidence_tag" --repo "$GITHUB_REPOSITORY" \
+            >/dev/null 2>"$release_view_error"; then
             printf 'Release evidence already exists: %s\n' "$evidence_tag" >&2
             exit 1
           fi
-          gh release create "$evidence_tag" evidence/* \
+          if ! grep -Eiq 'release not found|not found|status code: 404|HTTP 404|404 Not Found' "$release_view_error"; then
+            cat "$release_view_error" >&2
+            printf 'Unable to prove the evidence release tag is absent; refusing to publish.\n' >&2
+            exit 1
+          fi
+          release_files=(
+            evidence/release-intent.json
+            evidence/release-intent.json.sig.1
+            evidence/release-intent.json.sig.2
+            evidence/build-evidence.json
+            evidence/evidence-lock.json
+            evidence/release-record.json
+            evidence/sbom.spdx.json
+            evidence/licenses.json
+            evidence/provenance.intoto.json
+            evidence/vulnerabilities.json
+            evidence/artifact.sigstore.json
+            evidence/build-evidence.attestation.sigstore.json
+            evidence/license.attestation.sigstore.json
+            evidence/sbom.attestation.sigstore.json
+            evidence/provenance.attestation.sigstore.json
+            evidence/vulnerability.attestation.sigstore.json
+            evidence/promotion-manifest.json
+            evidence/rollback-manifest.json
+            evidence/promotion-manifest.sigstore.json
+            evidence/rollback-manifest.sigstore.json
+            evidence/artifact-lock-proposal.json
+            evidence/artifact-lock-proposal.sigstore.json
+          )
+          for file in "${release_files[@]}"; do
+            [[ -f "$file" && ! -L "$file" ]] || {
+              printf 'Required release evidence file is missing or unsafe: %s\n' "$file" >&2
+              exit 1
+            }
+          done
+          gh release create "$evidence_tag" "${release_files[@]}" \
             --repo "$GITHUB_REPOSITORY" \
             --target "$GITHUB_SHA" \
             --title "Release evidence $INTENT_ID" \
@@ -460,6 +1296,33 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: promotion-evidence-${{ needs.validate-intent.outputs.intent-id }}
-          path: evidence/
+          path: |
+            evidence/release-intent.json
+            evidence/release-intent.json.sig.1
+            evidence/release-intent.json.sig.2
+            evidence/build-evidence.json
+            evidence/evidence-lock.json
+            evidence/release-record.json
+            evidence/sbom.spdx.json
+            evidence/licenses.json
+            evidence/provenance.intoto.json
+            evidence/vulnerabilities.json
+            evidence/artifact.sigstore.json
+            evidence/build-evidence.attestation.sigstore.json
+            evidence/license.attestation.sigstore.json
+            evidence/sbom.attestation.sigstore.json
+            evidence/provenance.attestation.sigstore.json
+            evidence/vulnerability.attestation.sigstore.json
+            evidence/promotion-manifest.json
+            evidence/rollback-manifest.json
+            evidence/promotion-manifest.sigstore.json
+            evidence/rollback-manifest.sigstore.json
+            evidence/artifact-lock-proposal.json
+            evidence/artifact-lock-proposal.sigstore.json
           if-no-files-found: error
           retention-days: 90
+
+      - name: Remove read-only registry credentials
+        if: ${{ always() }}
+        shell: bash
+        run: rm -rf -- "$RUNNER_TEMP/rollback-registry-auth"

@@ -1,18 +1,20 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://release-control.arconath.com/contracts/build-evidence.schema.json",
   "title": "Arconath build evidence",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema_version", "intent_id", "source", "artifact", "oci_archive_sha256"],
+  "required": ["schema_version", "intent_id", "release_control_sha", "source", "artifact", "oci_archive_sha256"],
   "properties": {
     "schema_version": {"const": 1},
-    "intent_id": {"type": "string"},
+    "intent_id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{7,127}$"},
+    "release_control_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
     "source": {
       "type": "object",
       "additionalProperties": false,
       "required": ["repository", "commit_sha", "tree_sha"],
       "properties": {
-        "repository": {"type": "string"},
+        "repository": {"type": "string", "pattern": "^Arconath/[a-z0-9][a-z0-9-]{1,99}$"},
         "commit_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
         "tree_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"}
       }
@@ -22,10 +24,10 @@
       "additionalProperties": false,
       "required": ["repository", "digest"],
       "properties": {
-        "repository": {"type": "string"},
-        "digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+        "repository": {"type": "string", "pattern": "^registry\\.arconath\\.internal/arconath/[a-z0-9][a-z0-9._-]*(?:/[a-z0-9][a-z0-9._-]*)*$"},
+        "digest": {"type": "string", "pattern": "^sha256:(?!0{64}$)[0-9a-f]{64}$"}
       }
     },
-    "oci_archive_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+    "oci_archive_sha256": {"type": "string", "pattern": "^(?!0{64}$)[0-9a-f]{64}$"}
   }
 }

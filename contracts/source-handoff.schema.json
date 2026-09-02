@@ -1,0 +1,90 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://release-control.arconath.com/contracts/source-handoff.schema.json",
+  "title": "Arconath encrypted source handoff",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "handoff_type",
+    "intent_id",
+    "run_id",
+    "source",
+    "plaintext_sha256",
+    "ciphertext"
+  ],
+  "properties": {
+    "schema_version": {"const": 1},
+    "handoff_type": {"enum": ["source", "candidate"]},
+    "intent_id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{7,127}$"},
+    "run_id": {"type": "string", "pattern": "^[1-9][0-9]{0,19}$"},
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository", "commit_sha", "tree_sha"],
+      "properties": {
+        "repository": {"type": "string", "pattern": "^Arconath/[a-z0-9][a-z0-9-]{1,99}$"},
+        "commit_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+        "tree_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"}
+      }
+    },
+    "plaintext_sha256": {"type": "string", "pattern": "^(?!0{64}$)[0-9a-f]{64}$"},
+    "ciphertext": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["filename", "sha256", "encryption", "recipient"],
+      "properties": {
+        "filename": {"enum": ["product.tar.age", "candidate.oci.tar.age"]},
+        "sha256": {"type": "string", "pattern": "^(?!0{64}$)[0-9a-f]{64}$"},
+        "encryption": {"const": "age-v1"},
+        "recipient": {"type": "string", "pattern": "^age1[a-z0-9]{20,200}$"}
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "type": "object",
+        "required": ["handoff_type"],
+        "properties": {
+          "handoff_type": {"const": "source"}
+        }
+      },
+      "then": {
+        "type": "object",
+        "required": ["ciphertext"],
+        "properties": {
+          "ciphertext": {
+            "type": "object",
+            "required": ["filename"],
+            "properties": {
+              "filename": {"const": "product.tar.age"}
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "type": "object",
+        "required": ["handoff_type"],
+        "properties": {
+          "handoff_type": {"const": "candidate"}
+        }
+      },
+      "then": {
+        "type": "object",
+        "required": ["ciphertext"],
+        "properties": {
+          "ciphertext": {
+            "type": "object",
+            "required": ["filename"],
+            "properties": {
+              "filename": {"const": "candidate.oci.tar.age"}
+            }
+          }
+        }
+      }
+    }
+  ]
+}

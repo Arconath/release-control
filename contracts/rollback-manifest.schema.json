@@ -1,15 +1,58 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://release-control.arconath.com/contracts/rollback-manifest.schema.json",
   "title": "Arconath rollback manifest",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema_version", "intent_id", "artifact_repository", "replace_digest", "restore_digest", "reason"],
+  "required": ["schema_version", "intent_id", "release_control_sha", "source", "artifact_repository", "evidence", "replace_digest", "restore_digest", "reason"],
   "properties": {
     "schema_version": {"const": 1},
-    "intent_id": {"type": "string"},
-    "artifact_repository": {"type": "string"},
-    "replace_digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "intent_id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{7,127}$"},
+    "release_control_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "source": {"$ref": "#/$defs/source"},
+    "artifact_repository": {"type": "string", "pattern": "^registry\\.arconath\\.internal/arconath/[a-z0-9][a-z0-9._-]*(?:/[a-z0-9][a-z0-9._-]*)*$"},
+    "evidence": {"$ref": "#/$defs/evidence"},
+    "replace_digest": {"type": "string", "pattern": "^sha256:(?!0{64}$)[0-9a-f]{64}$"},
     "restore_digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
-    "reason": {"type": "string"}
+    "reason": {"type": "string", "minLength": 8, "maxLength": 512}
+  },
+  "$defs": {
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository", "commit_sha", "tree_sha"],
+      "properties": {
+        "repository": {"type": "string", "pattern": "^Arconath/[a-z0-9][a-z0-9-]{1,99}$"},
+        "commit_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+        "tree_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"}
+      }
+    },
+    "file_hash": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["filename", "sha256"],
+      "properties": {
+        "filename": {"type": "string", "minLength": 1},
+        "sha256": {"type": "string", "pattern": "^(?!0{64}$)[0-9a-f]{64}$"}
+      }
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["lock", "sbom", "licenses", "provenance", "vulnerabilities", "artifact_signature", "build_evidence_attestation", "license_attestation", "sbom_attestation", "provenance_attestation", "vulnerability_attestation"],
+      "properties": {
+        "lock": {"allOf": [{"$ref": "#/$defs/file_hash"}, {"type": "object", "properties": {"filename": {"const": "evidence-lock.json"}}}]},
+        "sbom": {"allOf": [{"$ref": "#/$defs/file_hash"}, {"type": "object", "properties": {"filename": {"const": "sbom.spdx.json"}}}]},
+        "licenses": {"allOf": [{"$ref": "#/$defs/file_hash"}, {"type": "object", "properties": {"filename": {"const": "licenses.json"}}}]},
+        "provenance": {"allOf": [{"$ref": "#/$defs/file_hash"}, {"type": "object", "properties": {"filename": {"const": "provenance.intoto.json"}}}]},
+        "vulnerabilities": {"allOf": [{"$ref": "#/$defs/file_hash"}, {"type": "object", "properties": {"filename": {"const": "vulnerabilities.json"}}}]},
+        "artifact_signature": {"allOf": [{"$ref": "#/$defs/file_hash"}, {"type": "object", "properties": {"filename": {"const": "artifact.sigstore.json"}}}]},
+        "build_evidence_attestation": {"allOf": [{"$ref": "#/$defs/file_hash"}, {"type": "object", "properties": {"filename": {"const": "build-evidence.attestation.sigstore.json"}}}]},
+        "license_attestation": {"allOf": [{"$ref": "#/$defs/file_hash"}, {"type": "object", "properties": {"filename": {"const": "license.attestation.sigstore.json"}}}]},
+        "sbom_attestation": {"allOf": [{"$ref": "#/$defs/file_hash"}, {"type": "object", "properties": {"filename": {"const": "sbom.attestation.sigstore.json"}}}]},
+        "provenance_attestation": {"allOf": [{"$ref": "#/$defs/file_hash"}, {"type": "object", "properties": {"filename": {"const": "provenance.attestation.sigstore.json"}}}]},
+        "vulnerability_attestation": {"allOf": [{"$ref": "#/$defs/file_hash"}, {"type": "object", "properties": {"filename": {"const": "vulnerability.attestation.sigstore.json"}}}]}
+      }
+    }
   }
 }

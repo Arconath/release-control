@@ -2,6 +2,9 @@ __pycache__/
 *.py[cod]
 .DS_Store
 .release-work/
+release-transport/
 intents/*.json
 intents/*.json.sig
+intents/*.json.sig.1
+intents/*.json.sig.2
 !intents/README.md

@@ -1,18 +1,51 @@
 {
   "environments": {
+    "source-handoff": {
+      "protected_branches_only": true,
+      "prevent_self_review": true,
+      "required_reviewers": 2,
+      "required_secrets": [
+        "SOURCE_HANDOFF_AGE_IDENTITY"
+      ],
+      "wait_timer_minutes": 0
+    },
     "promotion": {
       "protected_branches_only": true,
-      "required_secrets": [],
+      "prevent_self_review": true,
+      "required_reviewers": 2,
+      "required_secrets": [
+        "ARCONATH_REGISTRY_READ_USERNAME",
+        "ARCONATH_REGISTRY_READ_PASSWORD"
+      ],
       "wait_timer_minutes": 0
     },
     "publication": {
       "protected_branches_only": true,
+      "prevent_self_review": true,
+      "required_reviewers": 2,
       "required_secrets": [
         "ARCONATH_REGISTRY_USERNAME",
-        "ARCONATH_REGISTRY_PASSWORD"
+        "ARCONATH_REGISTRY_PASSWORD",
+        "CANDIDATE_HANDOFF_AGE_IDENTITY"
       ],
       "wait_timer_minutes": 0
     }
+  },
+  "release_governance": {
+    "enforce_on_release": true,
+    "minimum_distinct_release_signers": 2,
+    "minimum_environment_reviewers": 2,
+    "minimum_named_codeowners": 2,
+    "required_codeowner_patterns": [
+      "*",
+      "/.github/CODEOWNERS",
+      "/.github/workflows/",
+      "/bootstrap/",
+      "/contracts/",
+      "/policies/",
+      "/scripts/",
+      "/tests/"
+    ]
   },
   "main_protection": {
     "allow_deletions": false,
@@ -40,6 +73,8 @@
   },
   "required_repository_variables": {
     "ARCONATH_REGISTRY_HOST": "registry.arconath.internal",
+    "CANDIDATE_HANDOFF_AGE_RECIPIENT": "set-after-candidate-handoff-key-is-created",
+    "SOURCE_HANDOFF_AGE_RECIPIENT": "set-after-source-handoff-key-is-created",
     "SOURCE_READER_APP_ID": "set-after-source-reader-app-is-created"
   },
   "schema_version": 1

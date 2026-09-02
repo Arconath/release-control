@@ -1,0 +1,96 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://release-control.arconath.com/contracts/evidence-lock.schema.json",
+  "title": "Arconath immutable build evidence lock",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "intent_id",
+    "release_control_sha",
+    "source",
+    "artifact",
+    "oci_archive_sha256",
+    "build_evidence",
+    "evidence"
+  ],
+  "properties": {
+    "schema_version": {"const": 1},
+    "intent_id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{7,127}$"},
+    "release_control_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository", "commit_sha", "tree_sha"],
+      "properties": {
+        "repository": {"type": "string", "pattern": "^Arconath/[a-z0-9][a-z0-9-]{1,99}$"},
+        "commit_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+        "tree_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"}
+      }
+    },
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository", "digest", "reference", "version"],
+      "properties": {
+        "repository": {"type": "string", "pattern": "^registry\\.arconath\\.internal/arconath/[a-z0-9][a-z0-9._-]*(?:/[a-z0-9][a-z0-9._-]*)*$"},
+        "digest": {"type": "string", "pattern": "^sha256:(?!0{64}$)[0-9a-f]{64}$"},
+        "reference": {"type": "string", "pattern": "^registry\\.arconath\\.internal/arconath/[a-z0-9][a-z0-9._-]*(?:/[a-z0-9][a-z0-9._-]*)*@sha256:(?!0{64}$)[0-9a-f]{64}$"},
+        "version": {"type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(?:-[0-9A-Za-z.-]+)?$"}
+      }
+    },
+    "oci_archive_sha256": {"type": "string", "pattern": "^(?!0{64}$)[0-9a-f]{64}$"},
+    "build_evidence": {
+      "allOf": [
+        {"$ref": "#/$defs/file_hash"},
+        {"type": "object", "properties": {"filename": {"const": "build-evidence.json"}}}
+      ]
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sbom", "licenses", "provenance", "vulnerabilities"],
+      "properties": {
+        "sbom": {"$ref": "#/$defs/sbom_file"},
+        "licenses": {"$ref": "#/$defs/license_file"},
+        "provenance": {"$ref": "#/$defs/provenance_file"},
+        "vulnerabilities": {"$ref": "#/$defs/vulnerability_file"}
+      }
+    }
+  },
+  "$defs": {
+    "file_hash": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["filename", "sha256"],
+      "properties": {
+        "filename": {"type": "string", "minLength": 1},
+        "sha256": {"type": "string", "pattern": "^(?!0{64}$)[0-9a-f]{64}$"}
+      }
+    },
+    "sbom_file": {
+      "allOf": [
+        {"$ref": "#/$defs/file_hash"},
+        {"type": "object", "properties": {"filename": {"const": "sbom.spdx.json"}}}
+      ]
+    },
+    "license_file": {
+      "allOf": [
+        {"$ref": "#/$defs/file_hash"},
+        {"type": "object", "properties": {"filename": {"const": "licenses.json"}}}
+      ]
+    },
+    "provenance_file": {
+      "allOf": [
+        {"$ref": "#/$defs/file_hash"},
+        {"type": "object", "properties": {"filename": {"const": "provenance.intoto.json"}}}
+      ]
+    },
+    "vulnerability_file": {
+      "allOf": [
+        {"$ref": "#/$defs/file_hash"},
+        {"type": "object", "properties": {"filename": {"const": "vulnerabilities.json"}}}
+      ]
+    }
+  }
+}

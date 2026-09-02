@@ -20,6 +20,10 @@ artifact as untrusted until its identity and digest have been verified.
 - All jobs use the `arconath-jit` runner group and canonical rootless labels.
 - Keep source-fetch, build-test, publish-sign, and promotion credentials in
   separate jobs. Publish jobs must never execute product source.
+- Public Actions artifacts must never contain private product source or a
+  plaintext OCI candidate. Cross-job source/candidate transports use the
+  reviewed age handoff envelope, exact run/source binding, and a bounded
+  decrypt step with its dedicated protected environment identity.
 - Release contracts are strict and fail on unknown fields, mutable references,
   expired intents, mismatched tree or artifact digests, and missing rollback.
 - Run `./scripts/verify.sh` and review the workflow permission map before push.
