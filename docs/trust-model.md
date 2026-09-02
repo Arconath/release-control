@@ -8,25 +8,34 @@
 - GitHub's OIDC identity for this exact workflow on `refs/heads/main`.
 - The configured private Distribution endpoint and its TLS trust chain.
 
-Production activation uses one named operator, `@hermawan22`, and one
-allowlisted intent-signing key. This is an explicit bootstrap policy, not a
-claim of two-person separation. GitHub Free requires the pull request and
-strict status/signed-commit controls but does not enforce a reviewer count;
-manual review must be recorded before the operator merges and signs an intent.
-The repository is intentionally keyless until the offline procedure in
-`docs/operator-key-bootstrap.md` installs the real public key. An SSH-agent
-identity on a workstation is not a substitute for that reviewed policy line,
-and no private key is ever stored in this repository or on a runner.
-Every privileged job revalidates the exact protected control SHA before
+Production activation requires two distinct named GitHub reviewers and two
+distinct allowlisted intent-signing keys. The bootstrap repository currently
+contains only `@hermawan22` and no real signer key; a second real operator and
+second key must be added through reviewed changes. Every release-sensitive
+CODEOWNERS path must list both direct named accounts; a second owner on an
+unrelated path or a one-member team does not satisfy the gate. The two-approval
+branch rule and three protected environments deliberately fail closed until
+then. Every privileged job revalidates the exact protected control SHA before
 crossing its credential boundary.
 
-Product source and every artifact it creates remain untrusted data. Product
-source runs only in `build-test`. The source archive and OCI candidate cross
+Product source and every artifact it creates remain untrusted data. Direct
+product verification commands run only in `product-validate`; candidate build
+runs in the subsequent `build-test` job. Those jobs require distinct JIT
+one-job runners so an untrusted validation process cannot persist into the
+builder. The source archive and OCI candidate cross
 job boundaries only as age-encrypted ciphertext with a canonical envelope bound
 to the intent, exact source identity, and GitHub run ID. A dedicated handoff
 identity is injected for one bounded decrypt step and is unset before any
 product verification or build command; it is not a source-reader, registry,
 OIDC, package, or deployment credential.
+
+The checked-in governance diagnostic is not a live GitHub check. With
+`--allow-incomplete`, it reports observed signer/CODEOWNER counts,
+`checked_in_contract_ready`, and `live_github_configuration: "unverified"`.
+The trusted release workflow omits that flag and aborts before source access
+when the two-person contract is incomplete. Actual branch protection,
+environment reviewers, and organization settings must still be verified in
+GitHub before production activation.
 
 ## Credential compartments
 
@@ -34,7 +43,8 @@ OIDC, package, or deployment credential.
 |---|---|---|
 | validate-intent | read-only job token | protected release-control source |
 | source-fetch | short-lived GitHub App token + public age recipient | one approved source repository, contents read; encrypted transport only |
-| build-test | protected source-handoff age identity for one decrypt step | encrypted source transport; no source-reader, registry, OIDC, package, or deployment authority |
+| product-validate | protected source-handoff age identity for one decrypt step | encrypted source transport and untrusted checks; no builder, source-reader, registry, OIDC, package, or deployment authority |
+| build-test | protected source-handoff age identity for one decrypt step + rootless BuildKit | separately decrypted validated source and candidate build; no source-reader, registry, OIDC, package, or deployment authority |
 | publish-sign | protected registry robot + candidate-handoff age identity + GitHub OIDC | one policy-bound registry repository and signatures; candidate decrypt only after identity revalidation |
 | promote | GitHub contents write + GitHub OIDC | release-control evidence release only |
 
@@ -45,13 +55,14 @@ has no source, handoff, or registry credential and cannot deploy.
 
 ## Fail-closed cases
 
-The release stops before publication when the intent is absent, non-canonical,
-expired, signed by an unknown key, or mismatched with policy; the source commit
-or tree differs; a handoff recipient, run ID, ciphertext hash, decrypted hash,
-or canonical filename differs; age is unavailable; registry host or robot
-credentials are absent; tests, SPDX license evidence, SLSA provenance, or the
-vulnerability gate fail; or the OCI archive changes in transit. A missing
-handoff identity fails closed before source or candidate use.
+The release stops before publication when the governance contract is incomplete,
+the intent is absent, non-canonical, expired, signed by an unknown key, or
+mismatched with policy; the source commit or tree differs; a handoff recipient,
+run ID, ciphertext hash, decrypted hash, or canonical filename differs; age is
+unavailable; registry host or robot credentials are absent; tests, SBOM,
+provenance, vulnerability evidence, or attestation verification fails; or the
+OCI archive changes in transit. A missing handoff identity fails closed before
+source or candidate use. The offline diagnostic never changes this gate.
 
 Validation, publication, and promotion each re-read the remote protected
 `main` SHA. A rerun of an old workflow or a release whose control policy was
@@ -65,13 +76,15 @@ candidate is never admissible.
 
 ## Promotion and rollback
 
-Promotion emits a digest-only manifest and the exact protected
-`release_control_sha` that generated it. Rollback is generated in the same run
-and identifies both the digest being replaced and the previously verified
-digest to restore. Neither document changes platform desired state. GitOps must
-verify the Sigstore bundle, release-control workflow identity and SHA,
-source/tree identity, artifact digest, and rollback digest before opening a
-deployment PR.
+Promotion emits a digest-only manifest, rollback, and proposal with the exact
+protected `release_control_sha` that generated them and the complete evidence
+map. Rollback identifies both the digest being replaced and the previously
+verified digest to restore. The artifact-lock proposal is always
+`proposal_only: true` and deployment-ineligible; neither it nor the other
+documents changes platform desired state. GitOps must verify all signed bundles,
+the release-control workflow identity and SHA, source/tree identity, artifact
+digest, evidence-lock hashes, and rollback digest before opening a deployment
+PR.
 
 GitHub Actions artifacts contain only age ciphertext for private source and
 OCI candidates; release, promotion, and SBOM evidence is digest metadata and

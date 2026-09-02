@@ -1,6 +1,6 @@
-# OpenSSH allowed-signers format. Exactly one real key for `hermawan22` must
-# be added through a reviewed PR before any release intent can verify. Do not
-# commit a placeholder key or a private key.
-# policy: minimumDistinctSigners: 1
-# operator: hermawan22
+# OpenSSH allowed-signers format. Two independent named operator keys must be
+# added through reviewed PRs before any release intent can verify. Do not commit
+# a placeholder key, private key, or two aliases for one key.
+# policy: minimumDistinctSigners: 2
+# principals: two distinct named GitHub accounts
 # identity[,identity...] [options] key-type base64-key [comment]

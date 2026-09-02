@@ -14,11 +14,13 @@ git diff --check
 
 python3 scripts/release_control.py validate-policy-set \
   --policy-dir policies/products
-python3 scripts/release_control.py validate-governance \
+governance_readiness="$(python3 scripts/release_control.py validate-governance \
   --codeowners .github/CODEOWNERS \
   --allowed-signers policies/release-signers \
   --settings bootstrap/repository-settings.json \
-  --allow-incomplete
+  --allow-incomplete)"
+printf 'governance readiness (checked-in diagnostic; live GitHub configuration is unverified): %s\n' \
+  "$governance_readiness"
 
 while IFS= read -r policy; do
   python3 scripts/release_control.py validate-policy \

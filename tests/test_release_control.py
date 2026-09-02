@@ -470,6 +470,21 @@ class ReleaseControlTests(unittest.TestCase):
         self.assertEqual(readiness["protected_codeowner_rules_ready"], len(patterns))
         self.assertEqual(readiness["release_signer_identities"], 2)
         self.assertEqual(readiness["release_signer_keys"], 2)
+        self.assertTrue(readiness["checked_in_contract_ready"])
+        self.assertEqual(readiness["live_github_configuration"], "unverified")
+
+    def test_incomplete_governance_diagnostic_cannot_claim_live_readiness(self) -> None:
+        readiness = rc.validate_governance(
+            ROOT / ".github/CODEOWNERS",
+            ROOT / "policies/release-signers",
+            ROOT / "bootstrap/repository-settings.json",
+            require_ready=False,
+        )
+        self.assertFalse(readiness["checked_in_contract_ready"])
+        self.assertEqual(readiness["live_github_configuration"], "unverified")
+        self.assertEqual(readiness["minimum_named_codeowners"], 2)
+        self.assertEqual(readiness["minimum_release_signer_keys"], 2)
+        self.assertEqual(readiness["minimum_environment_reviewers"], 2)
 
     def test_release_governance_requires_source_handoff_reviewers(self) -> None:
         codeowners = self.root / "CODEOWNERS"

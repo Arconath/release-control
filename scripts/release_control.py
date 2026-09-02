@@ -971,8 +971,13 @@ def validate_governance(
     settings_path: Path,
     *,
     require_ready: bool = True,
-) -> dict[str, int]:
-    """Validate two-person source governance and report current readiness."""
+) -> dict[str, Any]:
+    """Validate two-person source governance and report explicit readiness.
+
+    The optional diagnostic mode is intentionally not a live GitHub check.  Its
+    output therefore separates checked-in contract readiness from the external
+    branch-protection and environment configuration that GitHub must enforce.
+    """
 
     settings = load_json(settings_path)
     governance = settings.get("release_governance")
@@ -1060,22 +1065,37 @@ def validate_governance(
         for pattern in RELEASE_CODEOWNER_PATTERNS
     )
     signer_identities, signer_keys = operator_key_inventory(allowed_signers)
+    underprotected_rules = sorted(
+        pattern
+        for pattern, rule_owners in codeowner_rules.items()
+        if len(rule_owners) < minimum_codeowners
+    )
+    checked_in_contract_ready = (
+        len(owners) >= minimum_codeowners
+        and protected_rules_ready == len(RELEASE_CODEOWNER_PATTERNS)
+        and not underprotected_rules
+        and len(signer_identities) >= minimum_signers
+        and len(signer_keys) >= minimum_signers
+    )
     readiness = {
         "named_codeowners": len(owners),
         "protected_codeowner_rules_ready": protected_rules_ready,
         "release_signer_identities": len(signer_identities),
         "release_signer_keys": len(signer_keys),
+        "minimum_named_codeowners": minimum_codeowners,
+        "protected_codeowner_rules_required": len(RELEASE_CODEOWNER_PATTERNS),
+        "minimum_release_signer_identities": minimum_signers,
+        "minimum_release_signer_keys": minimum_signers,
+        "minimum_environment_reviewers": minimum_reviewers,
+        "underprotected_codeowner_rules": underprotected_rules,
+        "checked_in_contract_ready": checked_in_contract_ready,
+        "live_github_configuration": "unverified",
     }
     if require_ready and len(owners) < minimum_codeowners:
         die("at least two distinct named CODEOWNER accounts are required")
     if require_ready and protected_rules_ready != len(RELEASE_CODEOWNER_PATTERNS):
         die("every protected CODEOWNERS rule requires two distinct named accounts")
     if require_ready:
-        underprotected_rules = sorted(
-            pattern
-            for pattern, rule_owners in codeowner_rules.items()
-            if len(rule_owners) < minimum_codeowners
-        )
         if underprotected_rules:
             die(
                 "every CODEOWNERS rule requires two distinct named accounts: "
@@ -2186,7 +2206,11 @@ def main() -> int:
     governance_parser.add_argument("--codeowners", type=Path, required=True)
     governance_parser.add_argument("--allowed-signers", type=Path, required=True)
     governance_parser.add_argument("--settings", type=Path, required=True)
-    governance_parser.add_argument("--allow-incomplete", action="store_true")
+    governance_parser.add_argument(
+        "--allow-incomplete",
+        action="store_true",
+        help="print checked-in readiness diagnostics without allowing an incomplete release",
+    )
 
     intent_parser = sub.add_parser("validate-intent")
     intent_parser.add_argument("--intent", type=Path, required=True)
