@@ -1,7 +1,7 @@
-name: Validate release control
+name: Stage0 trusted candidate boundary
 
 on:
-  pull_request:
+  pull_request_target:
   push:
     branches: [main]
 
@@ -9,22 +9,104 @@ permissions:
   contents: read
 
 concurrency:
-  group: release-control-validation-${{ github.ref }}
+  group: stage0-trusted-candidate-${{ github.event.pull_request.number || github.sha }}
   cancel-in-progress: true
 
 jobs:
   validate:
-    name: contracts and workflow policy
-    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+    name: trusted-base candidate boundary
+    if: ${{ github.repository == 'Arconath/release-control' && ((github.event_name == 'pull_request_target' && github.event.pull_request.base.ref == 'main' && github.event.pull_request.base.repo.full_name == 'Arconath/release-control' && github.event.pull_request.head.repo.full_name == 'Arconath/release-control') || (github.event_name == 'push' && github.ref == 'refs/heads/main')) }}
     runs-on:
       group: arconath-jit
       labels: [self-hosted, linux, x64, arconath-jit, rootless-buildkit]
     timeout-minutes: 10
     steps:
-      - name: Check out trusted repository source
+      - name: Check out trusted base validator before candidate materialization
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          repository: ${{ github.repository }}
+          ref: ${{ github.event.pull_request.base.sha || github.sha }}
+          path: trusted
+          fetch-depth: 1
+          fetch-tags: false
+          submodules: false
+          lfs: false
           persist-credentials: false
 
-      - name: Verify contracts and workflow policy
-        run: ./scripts/verify.sh
+      - name: Materialize candidate as inert data
+        if: ${{ github.event_name == 'pull_request_target' }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ github.event.pull_request.head.repo.full_name }}
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: candidate
+          fetch-depth: 1
+          fetch-tags: false
+          submodules: false
+          lfs: false
+          persist-credentials: false
+
+      - name: Materialize protected tree as inert data
+        if: ${{ github.event_name == 'push' }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ github.repository }}
+          ref: ${{ github.sha }}
+          path: candidate
+          fetch-depth: 1
+          fetch-tags: false
+          submodules: false
+          lfs: false
+          persist-credentials: false
+
+      - name: Verify immutable candidate boundary with trusted base
+        shell: bash
+        env:
+          EXPECTED_BASE_SHA: ${{ github.event.pull_request.base.sha || github.sha }}
+          EXPECTED_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          BASE_REF: ${{ github.event.pull_request.base.ref || 'main' }}
+          BASE_REPOSITORY: ${{ github.event.pull_request.base.repo.full_name || github.repository }}
+          HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
+        run: |
+          set -Eeuo pipefail
+          export GIT_CONFIG_GLOBAL=/dev/null
+          export GIT_CONFIG_NOSYSTEM=1
+          export GIT_OPTIONAL_LOCKS=0
+          export GIT_TERMINAL_PROMPT=0
+          [[ "$GITHUB_REPOSITORY" == "Arconath/release-control" ]]
+          [[ "$GITHUB_EVENT_NAME" == "pull_request_target" || "$GITHUB_EVENT_NAME" == "push" ]]
+          [[ "$BASE_REF" == "main" ]]
+          [[ "$BASE_REPOSITORY" == "$GITHUB_REPOSITORY" ]]
+          [[ "$HEAD_REPOSITORY" == "$GITHUB_REPOSITORY" ]]
+          [[ "$GITHUB_EVENT_NAME" != "pull_request_target" || "$GITHUB_SHA" == "$EXPECTED_BASE_SHA" ]]
+          if [[ "$GITHUB_EVENT_NAME" == "push" ]]; then
+            [[ "$GITHUB_REF" == "refs/heads/main" ]]
+          fi
+          [[ "${RUNNER_ENVIRONMENT:-}" == "self-hosted" ]] || {
+            printf 'Validation requires the private self-hosted runner group.\n' >&2
+            exit 1
+          }
+          [[ "$(id -u)" != 0 ]]
+          test ! -e /var/run/docker.sock
+          test ! -L /var/run/docker.sock
+          test ! -e "/run/user/$(id -u)/docker.sock"
+          test ! -L "/run/user/$(id -u)/docker.sock"
+          [[ -z "${DOCKER_HOST:-}" && -z "${CONTAINER_HOST:-}" && -z "${PODMAN_HOST:-}" ]]
+          trusted_sha="$(git --no-optional-locks -C trusted -c core.fsmonitor=false -c core.hooksPath=/dev/null rev-parse --verify 'HEAD^{commit}')"
+          trusted_tree="$(git --no-optional-locks -C trusted -c core.fsmonitor=false -c core.hooksPath=/dev/null rev-parse --verify 'HEAD^{tree}')"
+          candidate_sha="$(git --no-optional-locks -C candidate -c core.fsmonitor=false -c core.hooksPath=/dev/null rev-parse --verify 'HEAD^{commit}')"
+          candidate_tree="$(git --no-optional-locks -C candidate -c core.fsmonitor=false -c core.hooksPath=/dev/null rev-parse --verify 'HEAD^{tree}')"
+          [[ "$trusted_sha" == "$EXPECTED_BASE_SHA" ]]
+          [[ "$candidate_sha" == "$EXPECTED_HEAD_SHA" ]]
+          python3 trusted/scripts/verify_candidate.py \
+            --trusted-root trusted \
+            --candidate-root candidate \
+            --event-name "$GITHUB_EVENT_NAME" \
+            --repository "$GITHUB_REPOSITORY" \
+            --base-repository "$BASE_REPOSITORY" \
+            --head-repository "$HEAD_REPOSITORY" \
+            --base-ref "$BASE_REF" \
+            --trusted-sha "$EXPECTED_BASE_SHA" \
+            --trusted-tree "$trusted_tree" \
+            --candidate-sha "$EXPECTED_HEAD_SHA" \
+            --candidate-tree "$candidate_tree"

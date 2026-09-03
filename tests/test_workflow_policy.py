@@ -51,9 +51,28 @@ class WorkflowPolicyTests(unittest.TestCase):
     def test_public_pull_requests_cannot_reach_private_runner(self) -> None:
         text = (WORKFLOWS / "validate.yml").read_text(encoding="utf-8")
         self.assertIn(
-            "github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository",
+            "github.repository == 'Arconath/release-control' && ((github.event_name == 'pull_request_target'",
             text,
         )
+
+    def test_stage0_has_one_unique_trusted_boundary_context(self) -> None:
+        text = (WORKFLOWS / "validate.yml").read_text(encoding="utf-8")
+        self.assertIn("name: Stage0 trusted candidate boundary", text)
+        self.assertIn("name: trusted-base candidate boundary", text)
+        self.assertEqual(text.count("run:"), 1)
+        self.assertEqual(text.count("python3 trusted/scripts/verify_candidate.py"), 1)
+        self.assertNotIn("./scripts/verify.sh", text)
+        self.assertNotIn("candidate/scripts/verify.sh", text)
+
+    def test_stage0_materializes_only_pinned_credentialless_data_checkouts(self) -> None:
+        text = (WORKFLOWS / "validate.yml").read_text(encoding="utf-8")
+        self.assertEqual(text.count("fetch-depth: 1"), 3)
+        self.assertEqual(text.count("fetch-tags: false"), 3)
+        self.assertEqual(text.count("submodules: false"), 3)
+        self.assertEqual(text.count("lfs: false"), 3)
+        self.assertEqual(text.count("persist-credentials: false"), 3)
+        self.assertIn('"$GITHUB_SHA" == "$EXPECTED_BASE_SHA"', text)
+        self.assertIn("HEAD^{tree}", text)
 
     def test_release_credentials_are_separated_by_job(self) -> None:
         text = (WORKFLOWS / "release.yml").read_text(encoding="utf-8")
