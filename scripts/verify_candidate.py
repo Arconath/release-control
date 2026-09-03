@@ -35,7 +35,7 @@ WORKFLOW_DIRECTORY = ".github/workflows"
 # This is the exact Stage0 workflow allowlist.  The semantic checks below make
 # the policy legible; the digest closes whitespace, YAML alias, and obfuscation
 # gaps that a fragment-only check would leave open.
-EXPECTED_VALIDATION_WORKFLOW_SHA256 = "df09fbb7758d9d5dfb6ee604d8990fbd973547676c5f993ae27d329be5f08313"
+EXPECTED_VALIDATION_WORKFLOW_SHA256 = "9dab9afea2165c969f72391400f6546897de250ba7ca5e9c0709782cc8089690"
 LEGACY_VALIDATION_WORKFLOW_SHA256 = "f4dfe282896fbdf76e07142f637c4fdbf4eaf80980b00c5f1dd45131dca6dbc2"
 
 
@@ -205,7 +205,7 @@ def validate_workflow_semantics(text: str) -> None:
         "push:\n    branches: [main]\n",
         "permissions:\n  contents: read\n",
         "name: Stage0 trusted candidate boundary\n",
-        "name: trusted-base candidate boundary\n",
+        "name: contracts and workflow policy\n",
         "name: Preflight trusted runner and isolation before candidate materialization\n",
         "runs-on:\n      group: arconath-jit\n      labels: [self-hosted, linux, x64, arconath-jit, rootless-buildkit]\n",
         "if: ${{ github.repository == 'Arconath/release-control' && ((github.event_name == 'pull_request_target' && github.event.pull_request.base.ref == 'main' && github.event.pull_request.base.repo.full_name == 'Arconath/release-control' && github.event.pull_request.head.repo.full_name == 'Arconath/release-control') || (github.event_name == 'push' && github.ref == 'refs/heads/main')) }}\n",

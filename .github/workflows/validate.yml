@@ -14,7 +14,7 @@ concurrency:
 
 jobs:
   validate:
-    name: trusted-base candidate boundary
+    name: contracts and workflow policy
     if: ${{ github.repository == 'Arconath/release-control' && ((github.event_name == 'pull_request_target' && github.event.pull_request.base.ref == 'main' && github.event.pull_request.base.repo.full_name == 'Arconath/release-control' && github.event.pull_request.head.repo.full_name == 'Arconath/release-control') || (github.event_name == 'push' && github.ref == 'refs/heads/main')) }}
     runs-on:
       group: arconath-jit

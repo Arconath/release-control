@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 import unittest
 from pathlib import Path
@@ -57,8 +58,13 @@ class WorkflowPolicyTests(unittest.TestCase):
 
     def test_stage0_has_one_unique_trusted_boundary_context(self) -> None:
         text = (WORKFLOWS / "validate.yml").read_text(encoding="utf-8")
+        settings = json.loads((ROOT / "bootstrap/repository-settings.json").read_text(encoding="utf-8"))
+        protected_context = settings["main_protection"]["required_checks"][0]
         self.assertIn("name: Stage0 trusted candidate boundary", text)
-        self.assertIn("name: trusted-base candidate boundary", text)
+        match = re.search(r"(?m)^  validate:\n    name: (.+)$", text)
+        self.assertIsNotNone(match)
+        self.assertEqual(match.group(1), protected_context)
+        self.assertEqual(protected_context, "contracts and workflow policy")
         self.assertEqual(text.count("run:"), 2)
         self.assertEqual(text.count("python3 trusted/scripts/verify_candidate.py"), 1)
         self.assertNotIn("./scripts/verify.sh", text)
