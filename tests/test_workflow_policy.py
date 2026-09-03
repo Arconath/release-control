@@ -59,10 +59,28 @@ class WorkflowPolicyTests(unittest.TestCase):
         text = (WORKFLOWS / "validate.yml").read_text(encoding="utf-8")
         self.assertIn("name: Stage0 trusted candidate boundary", text)
         self.assertIn("name: trusted-base candidate boundary", text)
-        self.assertEqual(text.count("run:"), 1)
+        self.assertEqual(text.count("run:"), 2)
         self.assertEqual(text.count("python3 trusted/scripts/verify_candidate.py"), 1)
         self.assertNotIn("./scripts/verify.sh", text)
         self.assertNotIn("candidate/scripts/verify.sh", text)
+
+    def test_trusted_preflight_precedes_candidate_checkout_and_forks_skip_job(self) -> None:
+        text = (WORKFLOWS / "validate.yml").read_text(encoding="utf-8")
+        trusted_checkout = text.index("Check out trusted base validator")
+        preflight = text.index("Preflight trusted runner and isolation before candidate materialization")
+        candidate_checkout = text.index("Materialize candidate as inert data")
+        self.assertLess(trusted_checkout, preflight)
+        self.assertLess(preflight, candidate_checkout)
+        preflight_text = text[preflight:candidate_checkout]
+        self.assertIn("RUNNER_ENVIRONMENT", preflight_text)
+        self.assertIn("/var/run/docker.sock", preflight_text)
+        self.assertIn("test -f trusted/scripts/verify_candidate.py", preflight_text)
+        self.assertNotIn("if: ${{", preflight_text)
+        self.assertIn(
+            "github.event.pull_request.head.repo.full_name == 'Arconath/release-control'",
+            text,
+        )
+        self.assertIn("github.event_name == 'pull_request_target'", text)
 
     def test_stage0_materializes_only_pinned_credentialless_data_checkouts(self) -> None:
         text = (WORKFLOWS / "validate.yml").read_text(encoding="utf-8")

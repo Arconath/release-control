@@ -35,7 +35,8 @@ WORKFLOW_DIRECTORY = ".github/workflows"
 # This is the exact Stage0 workflow allowlist.  The semantic checks below make
 # the policy legible; the digest closes whitespace, YAML alias, and obfuscation
 # gaps that a fragment-only check would leave open.
-EXPECTED_VALIDATION_WORKFLOW_SHA256 = "f4dfe282896fbdf76e07142f637c4fdbf4eaf80980b00c5f1dd45131dca6dbc2"
+EXPECTED_VALIDATION_WORKFLOW_SHA256 = "df09fbb7758d9d5dfb6ee604d8990fbd973547676c5f993ae27d329be5f08313"
+LEGACY_VALIDATION_WORKFLOW_SHA256 = "f4dfe282896fbdf76e07142f637c4fdbf4eaf80980b00c5f1dd45131dca6dbc2"
 
 
 class ValidationError(ValueError):
@@ -205,6 +206,7 @@ def validate_workflow_semantics(text: str) -> None:
         "permissions:\n  contents: read\n",
         "name: Stage0 trusted candidate boundary\n",
         "name: trusted-base candidate boundary\n",
+        "name: Preflight trusted runner and isolation before candidate materialization\n",
         "runs-on:\n      group: arconath-jit\n      labels: [self-hosted, linux, x64, arconath-jit, rootless-buildkit]\n",
         "if: ${{ github.repository == 'Arconath/release-control' && ((github.event_name == 'pull_request_target' && github.event.pull_request.base.ref == 'main' && github.event.pull_request.base.repo.full_name == 'Arconath/release-control' && github.event.pull_request.head.repo.full_name == 'Arconath/release-control') || (github.event_name == 'push' && github.ref == 'refs/heads/main')) }}\n",
         "python3 trusted/scripts/verify_candidate.py ",
@@ -214,6 +216,9 @@ def validate_workflow_semantics(text: str) -> None:
         "--trusted-tree \"$trusted_tree\"",
         "--candidate-sha \"$EXPECTED_HEAD_SHA\"",
         "--candidate-tree \"$candidate_tree\"",
+        "RUNNER_ENVIRONMENT",
+        "test -f trusted/scripts/verify_candidate.py",
+        "test ! -L trusted/scripts/verify_candidate.py",
     )
     missing = [fragment for fragment in required if fragment not in text]
     if missing:
@@ -223,8 +228,8 @@ def validate_workflow_semantics(text: str) -> None:
         fail("validation workflow must have exactly one job")
     if text.count("actions/checkout@") != 3:
         fail("validation workflow must have exactly three pinned checkouts")
-    if len(re.findall(r"(?m)^\s+run:\s*", text)) != 1:
-        fail("validation workflow must have exactly one trusted run block")
+    if len(re.findall(r"(?m)^\s+run:\s*", text)) != 2:
+        fail("validation workflow must have exactly two trusted run blocks")
     if text.count("python3 trusted/scripts/verify_candidate.py") != 1:
         fail("validation workflow must invoke exactly one trusted validator")
     if text.count("path: trusted") != 1 or text.count("path: candidate") != 2:
@@ -263,10 +268,17 @@ def validate_workflow_semantics(text: str) -> None:
 
 
 def validate_workflow_text(text: str) -> None:
+    digest = sha256(text.encode("utf-8"))
+    if digest == LEGACY_VALIDATION_WORKFLOW_SHA256:
+        # The e391 freeze is the trusted base for this correction.  Its
+        # preflight-less workflow is accepted only as an exact immutable
+        # legacy fixture; it is never accepted as a new candidate workflow
+        # after the current allowlist is on protected main.
+        return
     validate_workflow_semantics(text)
     if EXPECTED_VALIDATION_WORKFLOW_SHA256 == "__WORKFLOW_SHA256__":
         fail("trusted workflow allowlist is not frozen")
-    if sha256(text.encode("utf-8")) != EXPECTED_VALIDATION_WORKFLOW_SHA256:
+    if digest != EXPECTED_VALIDATION_WORKFLOW_SHA256:
         fail("validation workflow does not match the exact Stage0 allowlist")
 
 
@@ -397,61 +409,290 @@ def materialized_snapshot(root: Path) -> dict[str, tuple[Any, ...]]:
     return snapshot
 
 
-def safe_materialize(archive: bytes, destination: Path) -> None:
-    regular_directory(destination, "archive materialization directory")
-    seen: set[str] = set()
+def effective_uid() -> int:
+    getter = getattr(os, "geteuid", None) or os.getuid
+    return getter()
+
+
+def materialization_directory_flags() -> int:
+    nofollow = getattr(os, "O_NOFOLLOW", None)
+    directory = getattr(os, "O_DIRECTORY", None)
+    if nofollow is None or directory is None:
+        fail("platform lacks no-follow directory-descriptor primitives")
+    return os.O_RDONLY | directory | nofollow | getattr(os, "O_CLOEXEC", 0)
+
+
+def check_owned_directory(descriptor: int, context: str) -> os.stat_result:
     try:
-        handle = tarfile.open(fileobj=io.BytesIO(archive), mode="r:")
-    except (tarfile.TarError, OSError) as exc:
-        fail(f"candidate archive cannot be opened: {exc}")
-    with handle:
-        for member in handle:
-            name = member.name
-            if name == "candidate":
-                if not member.isdir():
-                    fail("candidate archive root is not a directory")
-                continue
-            if not name.startswith("candidate/"):
-                fail(f"candidate archive contains an unexpected path: {name}")
-            relative = PurePosixPath(name.removeprefix("candidate/"))
-            if relative.is_absolute() or ".." in relative.parts:
-                fail(f"candidate archive contains an unsafe path: {name}")
-            if not relative.parts:
-                if name != "candidate/":
-                    fail(f"candidate archive contains an invalid root path: {name}")
-                continue
-            relative_name = "/".join(relative.parts)
-            if relative_name in seen:
-                fail(f"candidate archive contains a duplicate path: {name}")
-            seen.add(relative_name)
-            target = destination.joinpath(*relative.parts)
-            if member.issym() or member.islnk():
-                fail(f"candidate archive contains a symlink or hardlink: {name}")
-            if member.isdir():
+        metadata = os.fstat(descriptor)
+    except OSError as exc:
+        fail(f"{context} cannot be inspected: {exc}")
+    if not stat.S_ISDIR(metadata.st_mode):
+        fail(f"{context} must remain a directory")
+    if metadata.st_uid != effective_uid():
+        fail(f"{context} must be owned by the validator")
+    return metadata
+
+
+def check_owned_file(descriptor: int, context: str) -> os.stat_result:
+    try:
+        metadata = os.fstat(descriptor)
+    except OSError as exc:
+        fail(f"{context} cannot be inspected: {exc}")
+    if not stat.S_ISREG(metadata.st_mode):
+        fail(f"{context} must remain a regular file")
+    if metadata.st_uid != effective_uid() or metadata.st_nlink != 1:
+        fail(f"{context} has unexpected ownership or link count")
+    return metadata
+
+
+def check_visible_entry(
+    parent_descriptor: int,
+    name: str,
+    descriptor: int,
+    context: str,
+    *,
+    directory: bool,
+) -> None:
+    try:
+        visible = os.stat(
+            name,
+            dir_fd=parent_descriptor,
+            follow_symlinks=False,
+        )
+        opened = os.fstat(descriptor)
+    except OSError as exc:
+        fail(f"{context} changed during materialization: {exc}")
+    same_kind = stat.S_ISDIR(visible.st_mode) if directory else stat.S_ISREG(visible.st_mode)
+    if not same_kind or visible.st_dev != opened.st_dev or visible.st_ino != opened.st_ino:
+        fail(f"{context} changed during materialization")
+    if visible.st_uid != effective_uid():
+        fail(f"{context} is not owned by the validator")
+
+
+def open_owned_destination(destination: Path) -> int:
+    regular_directory(destination, "archive materialization directory")
+    flags = materialization_directory_flags()
+    try:
+        descriptor = os.open(destination, flags)
+    except OSError as exc:
+        fail(f"archive materialization directory cannot be opened safely: {exc}")
+    try:
+        check_owned_directory(descriptor, "archive materialization directory")
+        try:
+            entries = os.listdir(descriptor)
+        except OSError as exc:
+            fail(f"archive materialization directory cannot be listed: {exc}")
+        if entries:
+            fail("archive materialization directory must be empty")
+        return descriptor
+    except ValidationError:
+        os.close(descriptor)
+        raise
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def open_child_directory(parent_descriptor: int, name: str, context: str) -> int:
+    flags = materialization_directory_flags()
+    try:
+        descriptor = os.open(name, flags, dir_fd=parent_descriptor)
+    except FileNotFoundError:
+        try:
+            os.mkdir(name, 0o700, dir_fd=parent_descriptor)
+        except FileExistsError:
+            pass
+        except OSError as exc:
+            fail(f"{context} cannot be created safely: {exc}")
+        try:
+            descriptor = os.open(name, flags, dir_fd=parent_descriptor)
+        except OSError as exc:
+            fail(f"{context} cannot be opened safely: {exc}")
+    except OSError as exc:
+        fail(f"{context} cannot be opened safely: {exc}")
+    try:
+        check_owned_directory(descriptor, context)
+        check_visible_entry(parent_descriptor, name, descriptor, context, directory=True)
+        return descriptor
+    except ValidationError:
+        os.close(descriptor)
+        raise
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def ensure_directory_chain(
+    root_descriptor: int,
+    directory_descriptors: dict[tuple[str, ...], int],
+    components: tuple[str, ...],
+) -> int:
+    current: tuple[str, ...] = ()
+    for component in components:
+        next_path = current + (component,)
+        descriptor = directory_descriptors.get(next_path)
+        if descriptor is None:
+            descriptor = open_child_directory(
+                directory_descriptors[current],
+                component,
+                "archive materialization directory",
+            )
+            directory_descriptors[next_path] = descriptor
+        current = next_path
+    return directory_descriptors[current] if current else root_descriptor
+
+
+def archive_parts(name: str) -> tuple[str, ...]:
+    if name == "candidate":
+        return ()
+    if not name.startswith("candidate/"):
+        fail(f"candidate archive contains an unexpected path: {name}")
+    raw = name.removeprefix("candidate/")
+    parts = tuple(raw.split("/"))
+    if not parts or any(not part or part in {".", ".."} for part in parts):
+        fail(f"candidate archive contains an unsafe path: {name}")
+    return parts
+
+
+def write_archive_file(descriptor: int, stream: Any, context: str) -> None:
+    while True:
+        try:
+            chunk = stream.read(1024 * 1024)
+        except OSError as exc:
+            fail(f"{context} cannot be read: {exc}")
+        if not chunk:
+            return
+        view = memoryview(chunk)
+        while view:
+            try:
+                written = os.write(descriptor, view)
+            except OSError as exc:
+                fail(f"{context} cannot be written: {exc}")
+            if written <= 0:
+                fail(f"{context} write made no progress")
+            view = view[written:]
+
+
+def safe_directory_mode(mode: int) -> int:
+    # Directory execute permission is required for descriptor-relative child
+    # traversal.  Materialized bytes remain private to the validator even if
+    # the archive requested group/world permissions.
+    return 0o700
+
+
+def safe_file_mode(mode: int) -> int:
+    return 0o700 if stat.S_IMODE(mode) & stat.S_IXUSR else 0o600
+
+
+def safe_materialize(archive: bytes, destination: Path) -> None:
+    root_descriptor = open_owned_destination(destination)
+    directory_descriptors: dict[tuple[str, ...], int] = {(): root_descriptor}
+    file_descriptors: list[tuple[int, str, int]] = []
+    seen: set[tuple[str, ...]] = set()
+    root_seen = False
+    try:
+        try:
+            handle = tarfile.open(fileobj=io.BytesIO(archive), mode="r:")
+        except (tarfile.TarError, OSError) as exc:
+            fail(f"candidate archive cannot be opened: {exc}")
+        with handle:
+            for member in handle:
+                name = member.name
+                parts = archive_parts(name)
+                if not parts:
+                    if root_seen or not member.isdir():
+                        fail("candidate archive root is invalid or duplicated")
+                    root_seen = True
+                    continue
+                if not root_seen:
+                    fail("candidate archive must begin with a directory root")
+                if parts in seen:
+                    fail(f"candidate archive contains a duplicate path: {name}")
+                seen.add(parts)
+                if member.issym() or member.islnk():
+                    fail(f"candidate archive contains a symlink or hardlink: {name}")
+                parent = ensure_directory_chain(root_descriptor, directory_descriptors, parts[:-1])
+                leaf = parts[-1]
+                if member.isdir():
+                    descriptor = ensure_directory_chain(
+                        root_descriptor,
+                        directory_descriptors,
+                        parts,
+                    )
+                    os.fchmod(descriptor, safe_directory_mode(member.mode))
+                    check_owned_directory(descriptor, f"archive directory {name}")
+                    continue
+                if not member.isfile():
+                    fail(f"candidate archive contains an unsupported file type: {name}")
+                flags = (
+                    os.O_WRONLY
+                    | os.O_CREAT
+                    | os.O_EXCL
+                    | getattr(os, "O_NOFOLLOW", 0)
+                    | getattr(os, "O_CLOEXEC", 0)
+                )
                 try:
-                    target_metadata = target.lstat()
-                except FileNotFoundError:
-                    target.mkdir(parents=True, exist_ok=False)
+                    descriptor = os.open(
+                        leaf,
+                        flags,
+                        safe_file_mode(member.mode),
+                        dir_fd=parent,
+                    )
                 except OSError as exc:
-                    fail(f"candidate archive directory cannot be inspected: {name}: {exc}")
-                else:
-                    if not stat.S_ISDIR(target_metadata.st_mode):
-                        fail(f"candidate archive directory collides with a file: {name}")
-                os.chmod(target, stat.S_IMODE(member.mode) or 0o755)
-                continue
-            if not member.isfile():
-                fail(f"candidate archive contains an unsupported file type: {name}")
-            target.parent.mkdir(parents=True, exist_ok=True)
-            stream = handle.extractfile(member)
-            if stream is None:
-                fail(f"candidate archive file cannot be read: {name}")
-            with stream, target.open("xb") as output:
-                while True:
-                    chunk = stream.read(1024 * 1024)
-                    if not chunk:
-                        break
-                    output.write(chunk)
-            os.chmod(target, stat.S_IMODE(member.mode))
+                    fail(f"archive file {name} cannot be created safely: {exc}")
+                try:
+                    check_owned_file(descriptor, f"archive file {name}")
+                    stream = handle.extractfile(member)
+                    if stream is None:
+                        fail(f"candidate archive file cannot be read: {name}")
+                    with stream:
+                        write_archive_file(descriptor, stream, f"candidate archive file {name}")
+                    os.fchmod(descriptor, safe_file_mode(member.mode))
+                    check_owned_file(descriptor, f"archive file {name}")
+                    check_visible_entry(parent, leaf, descriptor, f"archive file {name}", directory=False)
+                    file_descriptors.append((parent, leaf, descriptor))
+                except BaseException:
+                    os.close(descriptor)
+                    raise
+            if not root_seen:
+                fail("candidate archive is missing its root directory")
+        for parent, name, descriptor in file_descriptors:
+            check_visible_entry(parent, name, descriptor, f"archive file {name}", directory=False)
+        for parts, descriptor in directory_descriptors.items():
+            if parts:
+                parent = directory_descriptors[parts[:-1]]
+                check_visible_entry(parent, parts[-1], descriptor, f"archive directory {'/'.join(parts)}", directory=True)
+        try:
+            visible_root = os.stat(destination, follow_symlinks=False)
+            opened_root = os.fstat(root_descriptor)
+        except OSError as exc:
+            fail(f"archive materialization directory changed during materialization: {exc}")
+        if (
+            not stat.S_ISDIR(visible_root.st_mode)
+            or visible_root.st_dev != opened_root.st_dev
+            or visible_root.st_ino != opened_root.st_ino
+            or visible_root.st_uid != effective_uid()
+        ):
+            fail("archive materialization directory changed during materialization")
+    finally:
+        for _, _, descriptor in reversed(file_descriptors):
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+        for parts, descriptor in sorted(
+            directory_descriptors.items(), key=lambda item: len(item[0]), reverse=True
+        ):
+            if parts:
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    pass
+        try:
+            os.close(root_descriptor)
+        except OSError:
+            pass
 
 
 def archive_candidate(root: Path) -> tuple[bytes, str]:
@@ -481,9 +722,16 @@ def validate_protected_files(trusted_root: Path, materialized_root: Path) -> dic
         fail("validation workflow is missing")
     trusted_text = trusted_workflow.decode("utf-8")
     candidate_text = candidate_workflow.decode("utf-8")
-    validate_workflow_text(trusted_text)
-    validate_workflow_text(candidate_text)
-    if trusted_workflow != candidate_workflow:
+    trusted_workflow_digest = sha256(trusted_workflow)
+    candidate_workflow_digest = sha256(candidate_workflow)
+    if trusted_workflow == candidate_workflow:
+        validate_workflow_text(trusted_text)
+    elif (
+        trusted_workflow_digest == LEGACY_VALIDATION_WORKFLOW_SHA256
+        and candidate_workflow_digest == EXPECTED_VALIDATION_WORKFLOW_SHA256
+    ):
+        validate_workflow_text(candidate_text)
+    else:
         fail("candidate modified the trusted validation workflow")
 
     trusted_validator = read_protected_bytes(trusted_root, VALIDATOR_SCRIPT)
