@@ -145,7 +145,7 @@ class AutomatedReleaseTests(unittest.TestCase):
                 "tree_sha": "e" * 40,
             },
             "target": {
-                "environment": "canary",
+                "environment": "production",
                 "backup_mode": rc.AUTOMATED_BACKUP_MODE,
                 "external_backup_guard": True,
                 "guard_evidence": {
