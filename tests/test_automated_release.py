@@ -171,7 +171,7 @@ class AutomatedReleaseTests(unittest.TestCase):
         rc.validate_automated_release_policy(self.policy)
         self.validate()
 
-    def test_checked_in_settings_keep_source_governance_but_remove_release_reviewers(self) -> None:
+    def test_checked_in_settings_remove_human_release_gates(self) -> None:
         settings = rc.load_json(ROOT / "bootstrap" / "repository-settings.json")
         rc.validate_automated_release_settings(settings)
         self.assertEqual(settings["main_protection"]["required_approvals"], 0)
@@ -180,6 +180,115 @@ class AutomatedReleaseTests(unittest.TestCase):
         for environment in settings["environments"].values():
             self.assertEqual(environment["required_reviewers"], 0)
             self.assertFalse(environment["can_admins_bypass"])
+
+    def test_registry_lookup_is_pinned_to_the_attested_digest(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            authfile = Path(directory) / "registry-auth.json"
+            authfile.write_text("{}\n", encoding="utf-8")
+            completed = subprocess.CompletedProcess(
+                ["skopeo"], 0, stdout=(ARTIFACT_DIGEST + "\n").encode(), stderr=b""
+            )
+            with mock.patch.object(rc.subprocess, "run", return_value=completed) as run:
+                rc.verify_registry_digest(
+                    "registry.arconath.internal/arconath/releasepassport/api",
+                    ARTIFACT_DIGEST,
+                    authfile,
+                )
+            command = run.call_args.args[0]
+            self.assertEqual(
+                command[-1],
+                "docker://registry.arconath.internal/arconath/releasepassport/api@"
+                + ARTIFACT_DIGEST,
+            )
+
+    def test_registry_lookup_rejects_tagged_or_zero_digest_inputs(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            authfile = Path(directory) / "registry-auth.json"
+            authfile.write_text("{}\n", encoding="utf-8")
+            with self.assertRaisesRegex(rc.ContractError, "invalid registry repository"):
+                rc.verify_registry_digest(
+                    "registry.arconath.internal/arconath/releasepassport/api:latest",
+                    ARTIFACT_DIGEST,
+                    authfile,
+                )
+            with self.assertRaisesRegex(rc.ContractError, "must not be the zero digest"):
+                rc.verify_registry_digest(
+                    "registry.arconath.internal/arconath/releasepassport/api",
+                    "sha256:" + "0" * 64,
+                    authfile,
+                )
+
+    def test_ledger_consumption_rechecks_expiry_with_fresh_clock(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            ledger = Path(directory) / "replay.jsonl"
+            expired_at_lock = dt.datetime(2026, 9, 4, 0, 16, tzinfo=dt.timezone.utc)
+            lock_acquired = False
+
+            def record_lock(_file_descriptor: int, _operation: int) -> None:
+                nonlocal lock_acquired
+                lock_acquired = True
+
+            def expired_clock() -> dt.datetime:
+                self.assertTrue(lock_acquired)
+                return expired_at_lock
+
+            with mock.patch.object(rc.fcntl, "flock", side_effect=record_lock):
+                with self.assertRaisesRegex(rc.ContractError, "expired before ledger consumption"):
+                    rc.consume_machine_attestation(
+                        self.attestation,
+                        self.policy,
+                        ledger,
+                        now=NOW,
+                        clock=expired_clock,
+                    )
+            self.assertFalse(ledger.exists() and ledger.read_text(encoding="utf-8"))
+            consumed_at = NOW + dt.timedelta(seconds=1)
+            entry = rc.consume_machine_attestation(
+                self.attestation,
+                self.policy,
+                ledger,
+                now=NOW,
+                clock=lambda: consumed_at,
+            )
+            self.assertEqual(entry["consumed_at"], "2026-09-04T00:05:01Z")
+
+    def test_admission_uses_fresh_clock_after_external_verification(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            ledger = root / "replay.jsonl"
+            authfile = root / "registry-auth.json"
+            authfile.write_text("{}\n", encoding="utf-8")
+            external_calls: list[str] = []
+
+            def registry_check(*_args: object) -> None:
+                external_calls.append("registry")
+
+            def expired_clock() -> dt.datetime:
+                self.assertEqual(external_calls, ["registry"])
+                return dt.datetime(2026, 9, 4, 0, 16, tzinfo=dt.timezone.utc)
+
+            with (
+                mock.patch.object(rc, "validate_machine_release_attestation"),
+                mock.patch.object(rc, "git_checkout_repository"),
+                mock.patch.object(rc, "git_checkout_identity"),
+                mock.patch.object(rc, "verify_registry_digest", side_effect=registry_check),
+            ):
+                with self.assertRaisesRegex(rc.ContractError, "expired before ledger consumption"):
+                    rc.admit_machine_release(
+                        self.attestation,
+                        self.policy,
+                        now=NOW,
+                        evidence_root=root,
+                        allowed_machine_signers=root / "allowed-signers",
+                        release_control_root=root,
+                        source_root=root,
+                        control_plane_root=root,
+                        registry_authfile=authfile,
+                        replay_ledger=ledger,
+                        clock=expired_clock,
+                    )
+            self.assertEqual(external_calls, ["registry"])
+            self.assertFalse(ledger.exists() and ledger.read_text(encoding="utf-8"))
 
     def test_missing_required_ci_context_is_rejected(self) -> None:
         value = copy.deepcopy(self.attestation)
@@ -385,6 +494,7 @@ class AutomatedReleaseTests(unittest.TestCase):
                     control_plane_root=ROOT,
                     registry_authfile=authfile,
                     replay_ledger=ledger,
+                    clock=lambda: NOW,
                 )
             self.assertEqual(entry["sequence"], 1)
             self.assertEqual(git_repository.call_count, 3)
@@ -406,6 +516,7 @@ class AutomatedReleaseTests(unittest.TestCase):
                         control_plane_root=ROOT,
                         registry_authfile=authfile,
                         replay_ledger=ledger,
+                        clock=lambda: NOW,
                     )
 
 

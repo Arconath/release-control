@@ -16,7 +16,7 @@ import subprocess
 import sys
 import tarfile
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import urlparse
 
 
@@ -442,6 +442,8 @@ def git_checkout_repository(root: Path, expected_repository: str, context: str) 
 
 
 def verify_registry_digest(repository: str, digest: str, authfile: Path) -> None:
+    repository = validate_artifact_repository(repository, "registry repository")
+    digest = _require_digest(digest, "registry digest")
     try:
         metadata = authfile.lstat()
     except OSError as exc:
@@ -457,7 +459,7 @@ def verify_registry_digest(repository: str, digest: str, authfile: Path) -> None
                 str(authfile),
                 "--format",
                 "{{.Digest}}",
-                f"docker://{repository}",
+                f"docker://{repository}@{digest}",
             ],
             stdin=subprocess.DEVNULL,
             capture_output=True,
@@ -1221,11 +1223,18 @@ def validate_machine_release_attestation(
 
 
 def consume_machine_attestation(
-    value: dict[str, Any], policy: dict[str, Any], ledger_path: Path, *, now: dt.datetime
+    value: dict[str, Any],
+    policy: dict[str, Any],
+    ledger_path: Path,
+    *,
+    now: dt.datetime,
+    clock: Callable[[], dt.datetime] | None = None,
 ) -> dict[str, Any]:
     """Atomically consume a single attestation in an append-only local ledger."""
 
     parent = ledger_path.parent
+    if clock is None:
+        clock = lambda: dt.datetime.now(dt.timezone.utc)
     try:
         parent_metadata = parent.lstat()
     except OSError as exc:
@@ -1296,11 +1305,23 @@ def consume_machine_attestation(
             if attestation_id in seen_ids or nonce in seen_nonces:
                 die("machine release attestation has already been consumed")
             expected_sequence = len(entries) + 1
+            # External evidence and registry checks happen before this lock is
+            # acquired.  Re-read the trusted UTC clock while holding the lock
+            # so a lease cannot be consumed after expiry or cooldown.
+            try:
+                fresh_now = clock()
+            except Exception as exc:
+                die(f"machine replay ledger clock could not be read: {exc}")
+            if not isinstance(fresh_now, dt.datetime) or fresh_now.tzinfo is None:
+                die("machine replay ledger clock must return timezone-aware UTC")
+            fresh_now = fresh_now.astimezone(dt.timezone.utc)
+            if fresh_now >= parse_time(value["expires_at"], "machine attestation expires_at"):
+                die("machine release attestation expired before ledger consumption")
             if value["audit"]["sequence"] != expected_sequence:
                 die("machine attestation audit sequence does not match replay ledger")
             if entries:
                 last_consumed = parse_time(entries[-1]["consumed_at"], "replay ledger consumed_at")
-                if now - last_consumed < dt.timedelta(
+                if fresh_now - last_consumed < dt.timedelta(
                     seconds=policy["rollout"]["cooldown_seconds"]
                 ):
                     die("machine release cooldown has not elapsed")
@@ -1308,7 +1329,7 @@ def consume_machine_attestation(
                 "artifact_digest": value["artifact"]["digest"],
                 "attestation_id": attestation_id,
                 "audit_entry_sha256": value["audit"]["entry_sha256"],
-                "consumed_at": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "consumed_at": fresh_now.strftime("%Y-%m-%dT%H:%M:%SZ"),
                 "expires_at": value["expires_at"],
                 "nonce": nonce,
                 "sequence": expected_sequence,
@@ -1334,6 +1355,7 @@ def admit_machine_release(
     control_plane_root: Path,
     registry_authfile: Path,
     replay_ledger: Path,
+    clock: Callable[[], dt.datetime] | None = None,
 ) -> dict[str, Any]:
     """Validate all trusted observations, then consume the attestation once."""
 
@@ -1376,7 +1398,7 @@ def admit_machine_release(
     verify_registry_digest(
         value["artifact"]["repository"], value["artifact"]["digest"], registry_authfile
     )
-    return consume_machine_attestation(value, policy, replay_ledger, now=now)
+    return consume_machine_attestation(value, policy, replay_ledger, now=now, clock=clock)
 
 
 def load_policy(policy_dir: Path, policy_id: str, *, require_enabled: bool = True) -> dict[str, Any]:
