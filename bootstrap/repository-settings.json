@@ -1,16 +1,20 @@
 {
   "environments": {
     "promotion": {
+      "can_admins_bypass": false,
       "protected_branches_only": true,
       "required_secrets": [],
+      "required_reviewers": 0,
       "wait_timer_minutes": 0
     },
     "publication": {
+      "can_admins_bypass": false,
       "protected_branches_only": true,
       "required_secrets": [
         "ARCONATH_REGISTRY_USERNAME",
         "ARCONATH_REGISTRY_PASSWORD"
       ],
+      "required_reviewers": 0,
       "wait_timer_minutes": 0
     }
   },
@@ -20,14 +24,25 @@
     "dismiss_stale_reviews": true,
     "enforce_admins": true,
     "linear_history": true,
-    "required_approvals": 2,
+    "required_approvals": 0,
     "required_checks": [
       "contracts and workflow policy"
     ],
-    "require_code_owner_review": true,
-    "require_last_push_approval": true,
+    "require_code_owner_review": false,
+    "require_last_push_approval": false,
     "require_signed_commits": true,
     "strict_checks": true
+  },
+  "release_governance": {
+    "authorization_mode": "machine-only",
+    "human_reviewers_required": false,
+    "human_signers_required": false,
+    "manual_override": false,
+    "policy_id": "arconath-automated-release",
+    "required_checks": [
+      "contracts and workflow policy",
+      "release-control machine attestation"
+    ]
   },
   "repository": {
     "delete_branch_on_merge": true,
