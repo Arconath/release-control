@@ -151,3 +151,12 @@ canonical digest, verify digest equality, and must never become a GitOps input.
 The suite covers canonical source identity, signed and expiring intents, strict
 policy matching, source archive integrity, job credential separation, exact OCI
 digest propagation, promotion identity, and rollback manifests.
+
+The current rollout authority admits production only. A canary is a bounded
+rollout inside production, with the existing health thresholds, cooldown,
+backup/domain guards and tested rollback evidence. No staging deployment or
+staging prerequisite is authorized by the current candidate policy. The first
+BoringKit artifact may be published without a prior digest only in explicit
+publication-only mode; that evidence cannot authorize a deployment or pretend
+a rollback baseline exists. BoringKit production targets namespace
+`boringkit-production` and retains all six workload bindings.

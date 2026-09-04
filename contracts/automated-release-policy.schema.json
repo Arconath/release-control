@@ -115,7 +115,7 @@
       "properties": {
         "environments": {
           "type": "array",
-          "const": ["staging", "canary", "production"]
+          "const": ["production"]
         },
         "canary_required": {"const": true},
         "automatic_rollback_required": {"const": true},

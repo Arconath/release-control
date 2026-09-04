@@ -723,7 +723,7 @@ def validate_automated_release_policy(value: dict[str, Any]) -> dict[str, Any]:
         },
         "automated release rollout",
     )
-    if rollout["environments"] != ["staging", "canary", "production"]:
+    if rollout["environments"] != ["production"]:
         die("automated release environments are not canonical")
     for name in (
         "canary_required",

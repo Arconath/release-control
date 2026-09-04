@@ -314,6 +314,13 @@ class AutomatedReleaseTests(unittest.TestCase):
         with self.assertRaisesRegex(rc.ContractError, "workflow repository"):
             self.validate(value)
 
+    def test_staging_and_separate_canary_environments_are_rejected(self) -> None:
+        for environment in ("staging", "canary"):
+            value = copy.deepcopy(self.attestation)
+            value["target"]["environment"] = environment
+            with self.subTest(environment=environment), self.assertRaisesRegex(rc.ContractError, "target environment is not allowed"):
+                self.validate(value)
+
     def test_missing_provenance_is_rejected(self) -> None:
         value = copy.deepcopy(self.attestation)
         del value["evidence"]["provenance"]

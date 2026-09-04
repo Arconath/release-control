@@ -94,7 +94,7 @@
         "guard_evidence"
       ],
       "properties": {
-        "environment": {"enum": ["staging", "canary", "production"]},
+        "environment": {"enum": ["production"]},
         "routes": {
           "type": "array",
           "minItems": 1,
