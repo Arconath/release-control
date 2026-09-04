@@ -78,7 +78,7 @@
       "additionalProperties": false,
       "required": ["repository", "digest"],
       "properties": {
-        "repository": {"type": "string", "pattern": "^registry\\.arconath\\.internal/arconath/[a-z0-9][a-z0-9._-]*(?:/[a-z0-9][a-z0-9._-]*)*$"},
+        "repository": {"type": "string", "pattern": "^ghcr\\.io/arconath/[a-z0-9][a-z0-9._-]*(?:/[a-z0-9][a-z0-9._-]*)*$"},
         "digest": {"type": "string", "pattern": "^sha256:(?!0{64}$)[0-9a-f]{64}$"}
       }
     },

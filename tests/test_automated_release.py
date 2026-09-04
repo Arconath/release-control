@@ -42,7 +42,7 @@ class AutomatedReleaseTests(unittest.TestCase):
         self.attestation = {
             "artifact": {
                 "digest": ARTIFACT_DIGEST,
-                "repository": "registry.arconath.internal/arconath/releasepassport/api",
+                "repository": "ghcr.io/arconath/releasepassport/api",
             },
             "attestation_id": "releasepassport-api-automated-01",
             "audit": {
@@ -190,14 +190,14 @@ class AutomatedReleaseTests(unittest.TestCase):
             )
             with mock.patch.object(rc.subprocess, "run", return_value=completed) as run:
                 rc.verify_registry_digest(
-                    "registry.arconath.internal/arconath/releasepassport/api",
+                    "ghcr.io/arconath/releasepassport/api",
                     ARTIFACT_DIGEST,
                     authfile,
                 )
             command = run.call_args.args[0]
             self.assertEqual(
                 command[-1],
-                "docker://registry.arconath.internal/arconath/releasepassport/api@"
+                "docker://ghcr.io/arconath/releasepassport/api@"
                 + ARTIFACT_DIGEST,
             )
 
@@ -207,13 +207,13 @@ class AutomatedReleaseTests(unittest.TestCase):
             authfile.write_text("{}\n", encoding="utf-8")
             with self.assertRaisesRegex(rc.ContractError, "invalid registry repository"):
                 rc.verify_registry_digest(
-                    "registry.arconath.internal/arconath/releasepassport/api:latest",
+                    "ghcr.io/arconath/releasepassport/api:latest",
                     ARTIFACT_DIGEST,
                     authfile,
                 )
             with self.assertRaisesRegex(rc.ContractError, "must not be the zero digest"):
                 rc.verify_registry_digest(
-                    "registry.arconath.internal/arconath/releasepassport/api",
+                    "ghcr.io/arconath/releasepassport/api",
                     "sha256:" + "0" * 64,
                     authfile,
                 )

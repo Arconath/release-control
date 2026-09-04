@@ -150,6 +150,8 @@ def validate_registry_host(value: Any, context: str = "registry_host") -> str:
     host = require_string(value, REGISTRY_HOST, context)
     if ":" in host and int(host.rsplit(":", 1)[1]) > 65535:
         die(f"invalid {context} port")
+    if host != "ghcr.io":
+        die(f"{context} must be canonical GHCR")
     return host
 
 
@@ -159,6 +161,8 @@ def validate_artifact_repository(value: Any, context: str) -> str:
     validate_registry_host(host, f"{context} registry host")
     if not segments or any(segment in {".", ".."} for segment in segments):
         die(f"invalid {context} path")
+    if not repository.startswith("ghcr.io/arconath/"):
+        die(f"{context} must use the canonical GHCR organization")
     return repository
 
 
@@ -943,7 +947,7 @@ def validate_machine_release_attestation(
     artifact_digest = _require_digest(
         artifact["digest"], "machine attestation artifact.digest"
     )
-    if not artifact_repository.startswith("registry.arconath.internal/arconath/"):
+    if not artifact_repository.startswith("ghcr.io/arconath/"):
         die("machine attestation artifact must use the canonical registry namespace")
 
     target = value["target"]

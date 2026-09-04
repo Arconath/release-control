@@ -1,5 +1,5 @@
 {
-  "artifact_repository": "registry.arconath.internal/arconath/example-api",
+  "artifact_repository": "ghcr.io/arconath/example-api",
   "build": {
     "context": ".",
     "dockerfile": "Dockerfile",
@@ -8,7 +8,7 @@
   "enabled": false,
   "max_intent_age_seconds": 86400,
   "policy_id": "example-api",
-  "registry_host": "registry.arconath.internal",
+  "registry_host": "ghcr.io",
   "schema_version": 1,
   "source_repository": "Arconath/example",
   "verification_commands": [

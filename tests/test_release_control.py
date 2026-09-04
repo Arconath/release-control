@@ -33,7 +33,7 @@ class ReleaseControlTests(unittest.TestCase):
         self.policy_dir = self.root / "policies"
         self.policy_dir.mkdir()
         self.policy = {
-            "artifact_repository": "registry.arconath.internal/arconath/example-api",
+            "artifact_repository": "ghcr.io/arconath/example-api",
             "build": {
                 "context": ".",
                 "dockerfile": "Dockerfile",
@@ -42,7 +42,7 @@ class ReleaseControlTests(unittest.TestCase):
             "enabled": True,
             "max_intent_age_seconds": 86400,
             "policy_id": "example-api",
-            "registry_host": "registry.arconath.internal",
+            "registry_host": "ghcr.io",
             "schema_version": 1,
             "source_repository": "Arconath/example",
             "verification_commands": [["./scripts/verify.sh"]],
@@ -51,7 +51,7 @@ class ReleaseControlTests(unittest.TestCase):
         self.now = dt.datetime(2026, 8, 31, 0, 30, tzinfo=dt.timezone.utc)
         self.intent = {
             "artifact": {
-                "repository": "registry.arconath.internal/arconath/example-api",
+                "repository": "ghcr.io/arconath/example-api",
                 "version": "1.2.3",
             },
             "expires_at": "2026-08-31T01:00:00Z",
@@ -164,13 +164,13 @@ class ReleaseControlTests(unittest.TestCase):
 
     def test_registry_repository_traversal_is_rejected(self) -> None:
         self.intent["artifact"]["repository"] = (
-            "registry.arconath.internal/arconath/../other"
+            "ghcr.io/arconath/../other"
         )
         with self.assertRaisesRegex(rc.ContractError, "invalid artifact.repository"):
             rc.validate_intent_value(self.intent, self.policy, now=self.now)
 
     def test_invalid_registry_port_is_rejected(self) -> None:
-        self.policy["registry_host"] = "registry.arconath.internal:99999"
+        self.policy["registry_host"] = "ghcr.io:99999"
         with self.assertRaisesRegex(rc.ContractError, "port"):
             rc.validate_policy(self.policy)
 
@@ -189,7 +189,7 @@ class ReleaseControlTests(unittest.TestCase):
         self.assertEqual(record["artifact"]["digest"], evidence["artifact"]["digest"])
         self.assertEqual(
             record["artifact"]["reference"],
-            "registry.arconath.internal/arconath/example-api@sha256:" + "4" * 64,
+            "ghcr.io/arconath/example-api@sha256:" + "4" * 64,
         )
 
     def test_changed_archive_is_rejected(self) -> None:

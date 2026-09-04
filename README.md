@@ -120,7 +120,7 @@ private `Arconath/.github` control plane must be configured with:
 - `SOURCE_READER_PRIVATE_KEY` repository secret for a GitHub App installed only
   on approved source repositories with `contents:read` and `metadata:read`.
 - `ARCONATH_REGISTRY_HOST` private-control-plane repository variable matching the reviewed policy,
-  normally `registry.arconath.internal` on the private service network.
+  normally `ghcr.io` on the private service network.
 - `ARCONATH_REGISTRY_USERNAME` and `ARCONATH_REGISTRY_PASSWORD` secrets on the
   protected `publication` environment for a robot account restricted to
   allowlisted repositories. The job fails before login if any value is absent.

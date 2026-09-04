@@ -1,0 +1,1 @@
+{"artifact_repository":"ghcr.io/arconath/boringkit-web","build":{"context":".","dockerfile":"docker/web.Dockerfile","platform":"linux/amd64"},"enabled":true,"max_intent_age_seconds":86400,"policy_id":"boringkit-web","registry_host":"ghcr.io","schema_version":1,"source_repository":"Arconath/boringkit","verification_commands":[["bash","scripts/ci/validate.sh","pr"]]}

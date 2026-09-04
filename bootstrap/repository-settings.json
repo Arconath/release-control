@@ -54,7 +54,7 @@
     "visibility": "public"
   },
   "required_repository_variables": {
-    "ARCONATH_REGISTRY_HOST": "registry.arconath.internal",
+    "ARCONATH_REGISTRY_HOST": "ghcr.io",
     "SOURCE_READER_APP_ID": "set-after-source-reader-app-is-created"
   },
   "schema_version": 1
